@@ -1,5 +1,3 @@
-clean the buttons to left side of the screen and change the colors to red, orange, yellow, green, cyan, blue, purple and add a menu that interact by clicking at buttom left that controls attraction like this, red is repel and green is attract so remove the attraction "color" to "color" button and when ever the squares are clicked, a attraction bar and range bar show at button of menu of the image i sent and i can scroll that 2 bar to control attraction and range send the whole modified code #define NOMINMAX
-
 \#include \<windows.h>
 \#include \<windowsx.h>
 \#include \<commctrl.h>
