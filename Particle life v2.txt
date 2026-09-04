@@ -1,0 +1,6993 @@
+clean the buttons to left side of the screen and change the colors to red, orange, yellow, green, cyan, blue, purple and add a menu that interact by clicking at buttom left that controls attraction like this, red is repel and green is attract so remove the attraction "color" to "color" button and when ever the squares are clicked, a attraction bar and range bar show at button of menu of the image i sent and i can scroll that 2 bar to control attraction and range send the whole modified code #define NOMINMAX
+
+\#include \<windows.h>
+\#include \<windowsx.h>
+\#include \<commctrl.h>
+
+\#include \<d3d11.h>
+\#include \<d3dcompiler.h>
+\#include \<dxgi.h>
+
+\#include \<vector>
+\#include \<random>
+\#include \<algorithm>
+\#include \<cmath>
+\#include \<cstdio>
+\#include \<cstring>
+
+\#pragma comment(lib, "Comctl32.lib")
+\#pragma comment(lib, "d3d11.lib")
+\#pragma comment(lib, "dxgi.lib")
+\#pragma comment(lib, "d3dcompiler.lib")
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+
+constexpr int COLOR\_COUNT = 7;
+
+constexpr int GPU\_GRID\_SIZE = 512;
+
+constexpr int GPU\_GRID\_BUCKET\_COUNT =
+GPU\_GRID\_SIZE \* GPU\_GRID\_SIZE;
+
+constexpr float GPU\_BUCKET\_SIZE = 20.0f;
+
+constexpr double SPAWN\_CENTER\_EXCLUSION\_RADIUS = 30.0;
+
+constexpr UINT DISPLAY\_TIMER\_INTERVAL = 16;
+
+constexpr int RANDOM\_SEED\_LENGTH = 10;
+
+// ============================================================
+// PLAY SPAWN AREA
+// ============================================================
+
+constexpr double PLAY\_SPAWN\_MIN\_X = -3000.0;
+constexpr double PLAY\_SPAWN\_MAX\_X = 3000.0;
+
+constexpr double PLAY\_SPAWN\_MIN\_Y = -2000.0;
+constexpr double PLAY\_SPAWN\_MAX\_Y = 2000.0;
+
+\#define SIMULATION\_TIMER 1
+
+\#define BUTTON\_ADD 1001
+\#define BUTTON\_CLEAR 1002
+\#define BUTTON\_START 1003
+\#define BUTTON\_WALL 1005
+\#define BUTTON\_SPAWN 1006
+\#define BUTTON\_SPEED 1007
+\#define BUTTON\_COLOR 1008
+
+\#define BUTTON\_FROMCOLOR 1009
+\#define BUTTON\_TOCOLOR 1010
+\#define BUTTON\_ATTRACTION 1011
+\#define BUTTON\_ATTRACTIONRANGE 1012
+
+\#define BUTTON\_RANDOMIZE\_PAIRS 1013
+\#define BUTTON\_SPAWN\_ALL 1014
+\#define BUTTON\_SPAWN\_ALL\_AMOUNT 1015
+
+\#define BUTTON\_REALISTIC\_FORCE 1016
+\#define BUTTON\_PLAY 1017
+\#define BUTTON\_TRUE\_SPEED 1018
+
+\#define SLIDER\_ATTRACTION 2001
+\#define SLIDER\_ATTRACTIONRANGE 2002
+
+\#define EDIT\_SEED 3001
+
+// ============================================================
+// DATA
+// ============================================================
+
+struct Cell
+{
+&#x20;   double x = 0.0;
+&#x20;   double y = 0.0;
+
+&#x20;   double vx = 0.0;
+&#x20;   double vy = 0.0;
+
+&#x20;   COLORREF color =
+&#x20;       RGB(
+&#x20;           255,
+&#x20;           255,
+&#x20;           255
+&#x20;       );
+
+&#x20;   int colorIndex = 0;
+};
+
+struct GPUCell
+{
+&#x20;   float x;
+&#x20;   float y;
+
+&#x20;   float vx;
+&#x20;   float vy;
+
+&#x20;   int colorIndex;
+
+&#x20;   float padding0;
+&#x20;   float padding1;
+&#x20;   float padding2;
+};
+
+static\_assert(
+&#x20;   sizeof(GPUCell) == 32,
+&#x20;   "GPUCell must be exactly 32 bytes."
+&#x20;   );
+
+// ============================================================
+// SIMULATION CONSTANT BUFFER
+//
+// MinimumDistance has been REMOVED.
+//
+// The final 32 bytes are:
+// maximumSpeed
+// attractionForce
+// wallSize
+// friction
+//
+// realisticForceEnabled
+// cellCount
+// timeScale
+// padding0
+// ============================================================
+
+struct GPUSimulationConstants
+{
+&#x20;   float attraction
+&#x20;       [COLOR\_COUNT]
+&#x20;       [2]
+&#x20;       [4];
+
+&#x20;   float attractionRange
+&#x20;       [COLOR\_COUNT]
+&#x20;       [2]
+&#x20;       [4];
+
+&#x20;   float maximumSpeed;
+&#x20;   float attractionForce;
+&#x20;   float wallSize;
+&#x20;   float friction;
+
+&#x20;   int realisticForceEnabled;
+&#x20;   int cellCount;
+
+&#x20;   float timeScale;
+&#x20;   float padding0;
+};
+
+static\_assert(
+&#x20;   sizeof(GPUSimulationConstants) % 16 == 0,
+&#x20;   "Simulation constant buffer must be 16-byte aligned."
+&#x20;   );
+
+struct GPUGridConstants
+{
+&#x20;   int cellCount;
+
+&#x20;   float padding0;
+&#x20;   float padding1;
+&#x20;   float padding2;
+};
+
+static\_assert(
+&#x20;   sizeof(GPUGridConstants) == 16,
+&#x20;   "Grid constant buffer must be 16 bytes."
+&#x20;   );
+
+struct GPURenderConstants
+{
+&#x20;   float cameraX;
+&#x20;   float cameraY;
+
+&#x20;   float zoom;
+&#x20;   float width;
+
+&#x20;   float height;
+&#x20;   float pixelRadius;
+
+&#x20;   float padding0;
+&#x20;   float padding1;
+};
+
+static\_assert(
+&#x20;   sizeof(GPURenderConstants) % 16 == 0,
+&#x20;   "Render constant buffer must be 16-byte aligned."
+&#x20;   );
+
+struct WallVertex
+{
+&#x20;   float x;
+&#x20;   float y;
+};
+
+// ============================================================
+// GLOBAL STATE
+// ============================================================
+
+HWND mainWindow = nullptr;
+
+HWND seedEdit = nullptr;
+
+std::vector\<Cell> cells;
+
+std::mt19937 randomGenerator(
+&#x20;   static\_cast\<unsigned int>(
+&#x20;       GetTickCount()
+&#x20;       )
+);
+
+// ============================================================
+// CAMERA
+// ============================================================
+
+double cameraX = 0.0;
+double cameraY = 0.0;
+
+double zoom = 1.0;
+
+bool rightDragging = false;
+
+int lastMouseX = 0;
+int lastMouseY = 0;
+
+// ============================================================
+// SIMULATION
+// ============================================================
+
+bool simulationRunning = false;
+
+bool realisticForceEnabled = false;
+
+bool trueSpeedEnabled = false;
+
+double maximumSpeed = 3.0;
+
+double friction = 0.99;
+
+constexpr double ATTRACTION\_FORCE = 1.0;
+
+// ============================================================
+// PROCESS SPEED
+// ============================================================
+
+int processSpeeds[] =
+{
+&#x20;   30,
+&#x20;   60,
+&#x20;   120,
+&#x20;   240
+};
+
+int currentProcessSpeedIndex = 1;
+
+int processSpeed =
+processSpeeds[
+&#x20;   currentProcessSpeedIndex
+];
+
+double stepAccumulator = 0.0;
+
+// ============================================================
+// COLOR SETTINGS
+// ============================================================
+
+double attractionSettings
+[COLOR\_COUNT]
+[COLOR\_COUNT] = {};
+
+double attractionRangeSettings
+[COLOR\_COUNT]
+[COLOR\_COUNT] = {};
+
+int currentFromColorIndex = 0;
+
+int currentToColorIndex = 0;
+
+double currentAttraction = 0.0;
+
+double currentAttractionRange = 100.0;
+
+// ============================================================
+// WALLS
+// ============================================================
+
+double wallSizes[] =
+{
+&#x20;   300.0,
+&#x20;   500.0,
+&#x20;   1000.0,
+&#x20;   2000.0,
+&#x20;   0.0
+};
+
+int currentWallIndex = 1;
+
+double wallSize =
+wallSizes[
+&#x20;   currentWallIndex
+];
+
+// ============================================================
+// SPAWN
+// ============================================================
+
+int spawnAmounts[] =
+{
+&#x20;   1,
+&#x20;   10,
+&#x20;   100,
+&#x20;   1000
+};
+
+int currentSpawnIndex = 0;
+
+int spawnAmount =
+spawnAmounts[
+&#x20;   currentSpawnIndex
+];
+
+int currentSpawnAllIndex = 0;
+
+int spawnAllAmount =
+spawnAmounts[
+&#x20;   currentSpawnAllIndex
+];
+
+// ============================================================
+// COLORS
+// ============================================================
+
+COLORREF cellColors[] =
+{
+&#x20;   RGB(255, 255, 255),
+&#x20;   RGB(255, 0, 0),
+&#x20;   RGB(0, 0, 255),
+&#x20;   RGB(255, 255, 0),
+&#x20;   RGB(255, 105, 180),
+&#x20;   RGB(0, 255, 0),
+&#x20;   RGB(160, 32, 240)
+};
+
+const char\* colorNames[] =
+{
+&#x20;   "White",
+&#x20;   "Red",
+&#x20;   "Blue",
+&#x20;   "Yellow",
+&#x20;   "Pink",
+&#x20;   "Green",
+&#x20;   "Purple"
+};
+
+int currentColorIndex = 0;
+
+COLORREF currentCellColor =
+cellColors[
+&#x20;   currentColorIndex
+];
+
+// ============================================================
+// D3D11
+// ============================================================
+
+ID3D11Device\* gpuDevice = nullptr;
+
+ID3D11DeviceContext\* gpuContext = nullptr;
+
+IDXGISwapChain\* gpuSwapChain = nullptr;
+
+ID3D11RenderTargetView\* gpuRenderTarget = nullptr;
+
+// ============================================================
+// COMPUTE SHADERS
+// ============================================================
+
+ID3D11ComputeShader\* gpuBuildGridShader = nullptr;
+
+ID3D11ComputeShader\* gpuSimulationShader = nullptr;
+
+// ============================================================
+// CELL BUFFERS
+// ============================================================
+
+ID3D11Buffer\* gpuCellBuffer = nullptr;
+
+ID3D11ShaderResourceView\* gpuCellSRV = nullptr;
+
+ID3D11UnorderedAccessView\* gpuCellUAV = nullptr;
+
+ID3D11Buffer\* gpuCellScratchBuffer = nullptr;
+
+ID3D11ShaderResourceView\* gpuCellScratchSRV = nullptr;
+
+ID3D11UnorderedAccessView\* gpuCellScratchUAV = nullptr;
+
+ID3D11Buffer\* gpuCellStaging = nullptr;
+
+size\_t gpuCellCapacity = 0;
+
+int gpuCellCount = 0;
+
+// ============================================================
+// GRID
+// ============================================================
+
+ID3D11Buffer\* gpuGridHeadsBuffer = nullptr;
+
+ID3D11ShaderResourceView\* gpuGridHeadsSRV = nullptr;
+
+ID3D11UnorderedAccessView\* gpuGridHeadsUAV = nullptr;
+
+// ============================================================
+// LINKED LIST
+// ============================================================
+
+ID3D11Buffer\* gpuNextBuffer = nullptr;
+
+ID3D11ShaderResourceView\* gpuNextSRV = nullptr;
+
+ID3D11UnorderedAccessView\* gpuNextUAV = nullptr;
+
+// ============================================================
+// CONSTANT BUFFERS
+// ============================================================
+
+ID3D11Buffer\* gpuSimulationConstantBuffer = nullptr;
+
+ID3D11Buffer\* gpuGridConstantBuffer = nullptr;
+
+ID3D11Buffer\* gpuRenderConstantBuffer = nullptr;
+
+// ============================================================
+// RENDER SHADERS
+// ============================================================
+
+ID3D11VertexShader\* gpuCellVertexShader = nullptr;
+
+ID3D11GeometryShader\* gpuCellGeometryShader = nullptr;
+
+ID3D11PixelShader\* gpuCellPixelShader = nullptr;
+
+ID3D11VertexShader\* gpuWallVertexShader = nullptr;
+
+ID3D11PixelShader\* gpuWallPixelShader = nullptr;
+
+// ============================================================
+// WALL
+// ============================================================
+
+ID3D11Buffer\* gpuWallVertexBuffer = nullptr;
+
+ID3D11InputLayout\* gpuWallInputLayout = nullptr;
+
+bool gpuInitialized = false;
+
+// ============================================================
+// BUILD GRID SHADER
+// ============================================================
+
+const char\* buildGridShaderSource = R"(
+
+\#define GRID\_SIZE 512
+\#define BUCKET\_SIZE 20.0
+
+struct Cell
+{
+&#x20;   float x;
+&#x20;   float y;
+
+&#x20;   float vx;
+&#x20;   float vy;
+
+&#x20;   int colorIndex;
+
+&#x20;   float padding0;
+&#x20;   float padding1;
+&#x20;   float padding2;
+};
+
+StructuredBuffer\<Cell>
+Cells : register(t0);
+
+RWStructuredBuffer\<int>
+GridHeads : register(u0);
+
+RWStructuredBuffer\<int>
+Next : register(u1);
+
+cbuffer GridConstants : register(b0)
+{
+&#x20;   int CellCount;
+
+&#x20;   float Padding0;
+&#x20;   float Padding1;
+&#x20;   float Padding2;
+};
+
+int PositiveModulo(
+&#x20;   int value,
+&#x20;   int modulus
+)
+{
+&#x20;   int result =
+&#x20;       value %
+&#x20;       modulus;
+
+&#x20;   if (
+&#x20;       result <
+&#x20;       0
+&#x20;   )
+&#x20;   {
+&#x20;       result +=
+&#x20;           modulus;
+&#x20;   }
+
+&#x20;   return result;
+}
+
+[numthreads(256, 1, 1)]
+void main(
+&#x20;   uint3 id :
+&#x20;   SV\_DispatchThreadID
+)
+{
+&#x20;   uint cellIndex =
+&#x20;       id.x;
+
+&#x20;   if (
+&#x20;       cellIndex >=
+&#x20;       (uint)CellCount
+&#x20;   )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   Cell cell =
+&#x20;       Cells[
+&#x20;           cellIndex
+&#x20;       ];
+
+&#x20;   int bucketX =
+&#x20;       (int)floor(
+&#x20;           cell.x /
+&#x20;           BUCKET\_SIZE
+&#x20;       );
+
+&#x20;   int bucketY =
+&#x20;       (int)floor(
+&#x20;           cell.y /
+&#x20;           BUCKET\_SIZE
+&#x20;       );
+
+&#x20;   int gridX =
+&#x20;       PositiveModulo(
+&#x20;           bucketX,
+&#x20;           GRID\_SIZE
+&#x20;       );
+
+&#x20;   int gridY =
+&#x20;       PositiveModulo(
+&#x20;           bucketY,
+&#x20;           GRID\_SIZE
+&#x20;       );
+
+&#x20;   int gridIndex =
+&#x20;       gridY \*
+&#x20;       GRID\_SIZE +
+&#x20;       gridX;
+
+&#x20;   int oldHead;
+
+&#x20;   InterlockedExchange(
+&#x20;       GridHeads[
+&#x20;           gridIndex
+&#x20;       ],
+
+&#x20;       (int)cellIndex,
+
+&#x20;       oldHead
+&#x20;   );
+
+&#x20;   Next[
+&#x20;       cellIndex
+&#x20;   ] =
+&#x20;       oldHead;
+}
+
+)";
+
+// ============================================================
+// SIMULATION SHADER
+//
+// OLD:
+// MinimumDistance + positional separation correction.
+//
+// NEW:
+// Every particle receives an EXTRA attraction of:
+//
+//     -100%
+//     range 8
+//
+// against EVERY other particle.
+//
+// This is a normal force. It does NOT directly move particles
+// apart by editing their position.
+// ============================================================
+
+const char\* simulationShaderSource = R"(
+
+\#define COLOR\_COUNT 7
+
+\#define GRID\_SIZE 512
+
+\#define BUCKET\_SIZE 20.0
+
+\#define MAX\_BUCKET\_RADIUS 15
+
+// ============================================================
+// UNIVERSAL CLOSE-RANGE REPULSION
+//
+// -1.0 = -100%
+// Range = 8
+// ============================================================
+
+\#define UNIVERSAL\_REPULSION\_RANGE 12.0
+\#define UNIVERSAL\_REPULSION\_STRENGTH -2.0
+
+struct Cell
+{
+&#x20;   float x;
+&#x20;   float y;
+
+&#x20;   float vx;
+&#x20;   float vy;
+
+&#x20;   int colorIndex;
+
+&#x20;   float padding0;
+&#x20;   float padding1;
+&#x20;   float padding2;
+};
+
+StructuredBuffer\<int>
+GridHeads : register(t0);
+
+StructuredBuffer\<int>
+Next : register(t1);
+
+StructuredBuffer\<Cell>
+CellsIn : register(t2);
+
+RWStructuredBuffer\<Cell>
+CellsOut : register(u0);
+
+cbuffer SimulationConstants : register(b0)
+{
+&#x20;   float4 Attraction[7][2];
+
+&#x20;   float4 AttractionRange[7][2];
+
+&#x20;   float MaximumSpeed;
+
+&#x20;   float AttractionForce;
+
+&#x20;   float WallSize;
+
+&#x20;   float Friction;
+
+&#x20;   int RealisticForceEnabled;
+
+&#x20;   int CellCount;
+
+&#x20;   float TimeScale;
+
+&#x20;   float Padding0;
+};
+
+float GetAttraction(
+&#x20;   int sourceColor,
+&#x20;   int targetColor
+)
+{
+&#x20;   if (
+&#x20;       targetColor <
+&#x20;       4
+&#x20;   )
+&#x20;   {
+&#x20;       return Attraction[
+&#x20;           sourceColor
+&#x20;       ][0][
+&#x20;           targetColor
+&#x20;       ];
+&#x20;   }
+
+&#x20;   return Attraction[
+&#x20;       sourceColor
+&#x20;   ][1][
+&#x20;       targetColor - 4
+&#x20;   ];
+}
+
+float GetAttractionRange(
+&#x20;   int sourceColor,
+&#x20;   int targetColor
+)
+{
+&#x20;   if (
+&#x20;       targetColor <
+&#x20;       4
+&#x20;   )
+&#x20;   {
+&#x20;       return AttractionRange[
+&#x20;           sourceColor
+&#x20;       ][0][
+&#x20;           targetColor
+&#x20;       ];
+&#x20;   }
+
+&#x20;   return AttractionRange[
+&#x20;       sourceColor
+&#x20;   ][1][
+&#x20;       targetColor - 4
+&#x20;   ];
+}
+
+int PositiveModulo(
+&#x20;   int value,
+&#x20;   int modulus
+)
+{
+&#x20;   int result =
+&#x20;       value %
+&#x20;       modulus;
+
+&#x20;   if (
+&#x20;       result <
+&#x20;       0
+&#x20;   )
+&#x20;   {
+&#x20;       result +=
+&#x20;           modulus;
+&#x20;   }
+
+&#x20;   return result;
+}
+
+int GetGridIndex(
+&#x20;   int bucketX,
+&#x20;   int bucketY
+)
+{
+&#x20;   int gridX =
+&#x20;       PositiveModulo(
+&#x20;           bucketX,
+&#x20;           GRID\_SIZE
+&#x20;       );
+
+&#x20;   int gridY =
+&#x20;       PositiveModulo(
+&#x20;           bucketY,
+&#x20;           GRID\_SIZE
+&#x20;       );
+
+&#x20;   return
+&#x20;       gridY \*
+&#x20;       GRID\_SIZE +
+&#x20;       gridX;
+}
+
+[numthreads(256, 1, 1)]
+void main(
+&#x20;   uint3 id :
+&#x20;   SV\_DispatchThreadID
+)
+{
+&#x20;   uint sourceIndex =
+&#x20;       id.x;
+
+&#x20;   if (
+&#x20;       sourceIndex >=
+&#x20;       (uint)CellCount
+&#x20;   )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   Cell source =
+&#x20;       CellsIn[
+&#x20;           sourceIndex
+&#x20;       ];
+
+&#x20;   int sourceColor =
+&#x20;       source.colorIndex;
+
+&#x20;   // ========================================================
+&#x20;   // The search radius must always include range 8,
+&#x20;   // even if all normal color attractions are disabled.
+&#x20;   // ========================================================
+
+&#x20;   float largestRange =
+&#x20;       UNIVERSAL\_REPULSION\_RANGE;
+
+&#x20;   [unroll]
+&#x20;   for (
+&#x20;       int color = 0;
+&#x20;       color < COLOR\_COUNT;
+&#x20;       ++color
+&#x20;   )
+&#x20;   {
+&#x20;       float attraction =
+&#x20;           GetAttraction(
+&#x20;               sourceColor,
+&#x20;               color
+&#x20;           );
+
+&#x20;       if (
+&#x20;           abs(attraction) <
+&#x20;           0.000001
+&#x20;       )
+&#x20;       {
+&#x20;           continue;
+&#x20;       }
+
+&#x20;       float range =
+&#x20;           GetAttractionRange(
+&#x20;               sourceColor,
+&#x20;               color
+&#x20;           );
+
+&#x20;       if (
+&#x20;           range >
+&#x20;           largestRange
+&#x20;       )
+&#x20;       {
+&#x20;           largestRange =
+&#x20;               range;
+&#x20;       }
+&#x20;   }
+
+&#x20;   int bucketRadius =
+&#x20;       (int)ceil(
+&#x20;           largestRange /
+&#x20;           BUCKET\_SIZE
+&#x20;       );
+
+&#x20;   bucketRadius =
+&#x20;       clamp(
+&#x20;           bucketRadius,
+&#x20;           1,
+&#x20;           MAX\_BUCKET\_RADIUS
+&#x20;       );
+
+&#x20;   int sourceBucketX =
+&#x20;       (int)floor(
+&#x20;           source.x /
+&#x20;           BUCKET\_SIZE
+&#x20;       );
+
+&#x20;   int sourceBucketY =
+&#x20;       (int)floor(
+&#x20;           source.y /
+&#x20;           BUCKET\_SIZE
+&#x20;       );
+
+&#x20;   float forceX =
+&#x20;       0.0;
+
+&#x20;   float forceY =
+&#x20;       0.0;
+
+&#x20;   float largestRangeSquared =
+&#x20;       largestRange \*
+&#x20;       largestRange;
+
+&#x20;   float universalRepulsionRangeSquared =
+&#x20;       UNIVERSAL\_REPULSION\_RANGE \*
+&#x20;       UNIVERSAL\_REPULSION\_RANGE;
+
+&#x20;   // ========================================================
+&#x20;   // SEARCH NEIGHBORS
+&#x20;   // ========================================================
+
+&#x20;   for (
+&#x20;       int by =
+&#x20;           sourceBucketY -
+&#x20;           bucketRadius;
+
+&#x20;       by <=
+&#x20;           sourceBucketY +
+&#x20;           bucketRadius;
+
+&#x20;       ++by
+&#x20;   )
+&#x20;   {
+&#x20;       for (
+&#x20;           int bx =
+&#x20;               sourceBucketX -
+&#x20;               bucketRadius;
+
+&#x20;           bx <=
+&#x20;               sourceBucketX +
+&#x20;               bucketRadius;
+
+&#x20;           ++bx
+&#x20;       )
+&#x20;       {
+&#x20;           int gridIndex =
+&#x20;               GetGridIndex(
+&#x20;                   bx,
+&#x20;                   by
+&#x20;               );
+
+&#x20;           int targetIndex =
+&#x20;               GridHeads[
+&#x20;                   gridIndex
+&#x20;               ];
+
+&#x20;           while (
+&#x20;               targetIndex !=
+&#x20;               -1
+&#x20;           )
+&#x20;           {
+&#x20;               if (
+&#x20;                   targetIndex <
+&#x20;                   0 ||
+&#x20;                   targetIndex >=
+&#x20;                   CellCount
+&#x20;               )
+&#x20;               {
+&#x20;                   break;
+&#x20;               }
+
+&#x20;               int nextTargetIndex =
+&#x20;                   Next[
+&#x20;                       targetIndex
+&#x20;                   ];
+
+&#x20;               if (
+&#x20;                   targetIndex !=
+&#x20;                   (int)sourceIndex
+&#x20;               )
+&#x20;               {
+&#x20;                   Cell target =
+&#x20;                       CellsIn[
+&#x20;                           targetIndex
+&#x20;                       ];
+
+&#x20;                   float dx =
+&#x20;                       target.x -
+&#x20;                       source.x;
+
+&#x20;                   float dy =
+&#x20;                       target.y -
+&#x20;                       source.y;
+
+&#x20;                   float distanceSquared =
+&#x20;                       dx \*
+&#x20;                       dx +
+&#x20;                       dy \*
+&#x20;                       dy;
+
+&#x20;                   if (
+&#x20;                       distanceSquared >
+&#x20;                       0.0001 &&
+&#x20;                       distanceSquared <=
+&#x20;                       largestRangeSquared
+&#x20;                   )
+&#x20;                   {
+&#x20;                       int targetColor =
+&#x20;                           target.colorIndex;
+
+&#x20;                       // ================================================
+&#x20;                       // NORMAL USER-CONTROLLED COLOR ATTRACTION
+&#x20;                       // ================================================
+
+&#x20;                       float attraction =
+&#x20;                           GetAttraction(
+&#x20;                               sourceColor,
+&#x20;                               targetColor
+&#x20;                           );
+
+&#x20;                       float range =
+&#x20;                           GetAttractionRange(
+&#x20;                               sourceColor,
+&#x20;                               targetColor
+&#x20;                           );
+
+&#x20;                       bool attractionActive =
+&#x20;                           abs(attraction) >=
+&#x20;                           0.000001 &&
+&#x20;                           range >
+&#x20;                           0.0 &&
+&#x20;                           distanceSquared <=
+&#x20;                           range \*
+&#x20;                           range;
+
+&#x20;                       // ================================================
+&#x20;                       // NEW UNIVERSAL REPULSION
+&#x20;                       //
+&#x20;                       // ALL particles repel ALL particles
+&#x20;                       // inside range 8.
+&#x20;                       // ================================================
+
+&#x20;                       bool universalRepulsionActive =
+&#x20;                           distanceSquared <=
+&#x20;                           universalRepulsionRangeSquared;
+
+&#x20;                       if (
+&#x20;                           attractionActive ||
+&#x20;                           universalRepulsionActive
+&#x20;                       )
+&#x20;                       {
+&#x20;                           float distance =
+&#x20;                               sqrt(
+&#x20;                                   distanceSquared
+&#x20;                               );
+
+&#x20;                           float inverseDistance =
+&#x20;                               1.0 /
+&#x20;                               distance;
+
+&#x20;                           float directionX =
+&#x20;                               dx \*
+&#x20;                               inverseDistance;
+
+&#x20;                           float directionY =
+&#x20;                               dy \*
+&#x20;                               inverseDistance;
+
+&#x20;                           // ============================================
+&#x20;                           // NORMAL COLOR FORCE
+&#x20;                           // ============================================
+
+&#x20;                           if (
+&#x20;                               attractionActive
+&#x20;                           )
+&#x20;                           {
+&#x20;                               float force =
+&#x20;                                   (
+&#x20;                                       attraction /
+&#x20;                                       100.0
+&#x20;                                   ) \*
+&#x20;                                   AttractionForce;
+
+&#x20;                               if (
+&#x20;                                   RealisticForceEnabled !=
+&#x20;                                   0
+&#x20;                               )
+&#x20;                               {
+&#x20;                                   float distanceFactor =
+&#x20;                                       max(
+&#x20;                                           1.0 -
+&#x20;                                           distance /
+&#x20;                                           range,
+
+&#x20;                                           0.0
+&#x20;                                       );
+
+&#x20;                                   force \*=
+&#x20;                                       distanceFactor;
+&#x20;                               }
+
+&#x20;                               forceX +=
+&#x20;                                   directionX \*
+&#x20;                                   force;
+
+&#x20;                               forceY +=
+&#x20;                                   directionY \*
+&#x20;                                   force;
+&#x20;                           }
+
+&#x20;                           // ============================================
+&#x20;                           // UNIVERSAL -100% / RANGE 8 REPULSION
+&#x20;                           // ============================================
+
+&#x20;                           if (
+&#x20;                               universalRepulsionActive
+&#x20;                           )
+&#x20;                           {
+&#x20;                               float repulsionForce =
+&#x20;                                   UNIVERSAL\_REPULSION\_STRENGTH \*
+&#x20;                                   AttractionForce;
+
+&#x20;                               // Make it behave like normal attraction
+&#x20;                               // when Realistic Force is enabled.
+&#x20;                               if (
+&#x20;                                   RealisticForceEnabled !=
+&#x20;                                   0
+&#x20;                               )
+&#x20;                               {
+&#x20;                                   float distanceFactor =
+&#x20;                                       max(
+&#x20;                                           1.0 -
+&#x20;                                           distance /
+&#x20;                                           UNIVERSAL\_REPULSION\_RANGE,
+
+&#x20;                                           0.0
+&#x20;                                       );
+
+&#x20;                                   repulsionForce \*=
+&#x20;                                       distanceFactor;
+&#x20;                               }
+
+&#x20;                               forceX +=
+&#x20;                                   directionX \*
+&#x20;                                   repulsionForce;
+
+&#x20;                               forceY +=
+&#x20;                                   directionY \*
+&#x20;                                   repulsionForce;
+&#x20;                           }
+&#x20;                       }
+&#x20;                   }
+&#x20;               }
+
+&#x20;               targetIndex =
+&#x20;                   nextTargetIndex;
+&#x20;           }
+&#x20;       }
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // APPLY ALL FORCES TO VELOCITY
+&#x20;   // ========================================================
+
+&#x20;   source.vx +=
+&#x20;       forceX \*
+&#x20;       TimeScale;
+
+&#x20;   source.vy +=
+&#x20;       forceY \*
+&#x20;       TimeScale;
+
+&#x20;   // ========================================================
+&#x20;   // FRICTION
+&#x20;   // ========================================================
+
+&#x20;   float frictionForStep =
+&#x20;       pow(
+&#x20;           Friction,
+&#x20;           TimeScale
+&#x20;       );
+
+&#x20;   source.vx \*=
+&#x20;       frictionForStep;
+
+&#x20;   source.vy \*=
+&#x20;       frictionForStep;
+
+&#x20;   // ========================================================
+&#x20;   // MAXIMUM SPEED
+&#x20;   // ========================================================
+
+&#x20;   float speedSquared =
+&#x20;       source.vx \*
+&#x20;       source.vx +
+&#x20;       source.vy \*
+&#x20;       source.vy;
+
+&#x20;   float maximumSpeedSquared =
+&#x20;       MaximumSpeed \*
+&#x20;       MaximumSpeed;
+
+&#x20;   if (
+&#x20;       speedSquared >
+&#x20;       maximumSpeedSquared
+&#x20;   )
+&#x20;   {
+&#x20;       float speed =
+&#x20;           sqrt(
+&#x20;               speedSquared
+&#x20;           );
+
+&#x20;       if (
+&#x20;           speed >
+&#x20;           0.000001
+&#x20;       )
+&#x20;       {
+&#x20;           float scale =
+&#x20;               MaximumSpeed /
+&#x20;               speed;
+
+&#x20;           source.vx \*=
+&#x20;               scale;
+
+&#x20;           source.vy \*=
+&#x20;               scale;
+&#x20;       }
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // MOVE
+&#x20;   // ========================================================
+
+&#x20;   source.x +=
+&#x20;       source.vx \*
+&#x20;       TimeScale;
+
+&#x20;   source.y +=
+&#x20;       source.vy \*
+&#x20;       TimeScale;
+
+&#x20;   // ========================================================
+&#x20;   // WALL COLLISION
+&#x20;   // ========================================================
+
+&#x20;   if (
+&#x20;       WallSize >
+&#x20;       0.0
+&#x20;   )
+&#x20;   {
+&#x20;       float halfWall =
+&#x20;           WallSize \*
+&#x20;           0.5;
+
+&#x20;       float particleRadius =
+&#x20;           5.0;
+
+&#x20;       if (
+&#x20;           source.x -
+&#x20;           particleRadius <
+&#x20;           -halfWall
+&#x20;       )
+&#x20;       {
+&#x20;           source.x =
+&#x20;               -halfWall +
+&#x20;               particleRadius;
+
+&#x20;           if (
+&#x20;               source.vx <
+&#x20;               0.0
+&#x20;           )
+&#x20;           {
+&#x20;               source.vx =
+&#x20;                   -source.vx;
+&#x20;           }
+&#x20;       }
+
+&#x20;       if (
+&#x20;           source.x +
+&#x20;           particleRadius >
+&#x20;           halfWall
+&#x20;       )
+&#x20;       {
+&#x20;           source.x =
+&#x20;               halfWall -
+&#x20;               particleRadius;
+
+&#x20;           if (
+&#x20;               source.vx >
+&#x20;               0.0
+&#x20;           )
+&#x20;           {
+&#x20;               source.vx =
+&#x20;                   -source.vx;
+&#x20;           }
+&#x20;       }
+
+&#x20;       if (
+&#x20;           source.y -
+&#x20;           particleRadius <
+&#x20;           -halfWall
+&#x20;       )
+&#x20;       {
+&#x20;           source.y =
+&#x20;               -halfWall +
+&#x20;               particleRadius;
+
+&#x20;           if (
+&#x20;               source.vy <
+&#x20;               0.0
+&#x20;           )
+&#x20;           {
+&#x20;               source.vy =
+&#x20;                   -source.vy;
+&#x20;           }
+&#x20;       }
+
+&#x20;       if (
+&#x20;           source.y +
+&#x20;           particleRadius >
+&#x20;           halfWall
+&#x20;       )
+&#x20;       {
+&#x20;           source.y =
+&#x20;               halfWall -
+&#x20;               particleRadius;
+
+&#x20;           if (
+&#x20;               source.vy >
+&#x20;               0.0
+&#x20;           )
+&#x20;           {
+&#x20;               source.vy =
+&#x20;                   -source.vy;
+&#x20;           }
+&#x20;       }
+&#x20;   }
+
+&#x20;   CellsOut[
+&#x20;       sourceIndex
+&#x20;   ] =
+&#x20;       source;
+}
+
+)";
+
+// ============================================================
+// CELL VERTEX SHADER
+// ============================================================
+
+const char\* cellVertexShaderSource = R"(
+
+struct Cell
+{
+&#x20;   float x;
+&#x20;   float y;
+
+&#x20;   float vx;
+&#x20;   float vy;
+
+&#x20;   int colorIndex;
+
+&#x20;   float padding0;
+&#x20;   float padding1;
+&#x20;   float padding2;
+};
+
+struct VSOutput
+{
+&#x20;   float4 position : SV\_POSITION;
+
+&#x20;   float4 color : COLOR0;
+};
+
+StructuredBuffer\<Cell>
+Cells : register(t0);
+
+cbuffer RenderConstants : register(b0)
+{
+&#x20;   float CameraX;
+&#x20;   float CameraY;
+
+&#x20;   float Zoom;
+&#x20;   float Width;
+
+&#x20;   float Height;
+&#x20;   float PixelRadius;
+
+&#x20;   float Padding0;
+&#x20;   float Padding1;
+};
+
+float4 GetColor(
+&#x20;   int colorIndex
+)
+{
+&#x20;   if (
+&#x20;       colorIndex ==
+&#x20;       0
+&#x20;   )
+&#x20;   {
+&#x20;       return float4(
+&#x20;           1,
+&#x20;           1,
+&#x20;           1,
+&#x20;           1
+&#x20;       );
+&#x20;   }
+
+&#x20;   if (
+&#x20;       colorIndex ==
+&#x20;       1
+&#x20;   )
+&#x20;   {
+&#x20;       return float4(
+&#x20;           1,
+&#x20;           0,
+&#x20;           0,
+&#x20;           1
+&#x20;       );
+&#x20;   }
+
+&#x20;   if (
+&#x20;       colorIndex ==
+&#x20;       2
+&#x20;   )
+&#x20;   {
+&#x20;       return float4(
+&#x20;           0,
+&#x20;           0,
+&#x20;           1,
+&#x20;           1
+&#x20;       );
+&#x20;   }
+
+&#x20;   if (
+&#x20;       colorIndex ==
+&#x20;       3
+&#x20;   )
+&#x20;   {
+&#x20;       return float4(
+&#x20;           1,
+&#x20;           1,
+&#x20;           0,
+&#x20;           1
+&#x20;       );
+&#x20;   }
+
+&#x20;   if (
+&#x20;       colorIndex ==
+&#x20;       4
+&#x20;   )
+&#x20;   {
+&#x20;       return float4(
+&#x20;           1.0,
+&#x20;           0.4118,
+&#x20;           0.7059,
+&#x20;           1
+&#x20;       );
+&#x20;   }
+
+&#x20;   if (
+&#x20;       colorIndex ==
+&#x20;       5
+&#x20;   )
+&#x20;   {
+&#x20;       return float4(
+&#x20;           0,
+&#x20;           1,
+&#x20;           0,
+&#x20;           1
+&#x20;       );
+&#x20;   }
+
+&#x20;   if (
+&#x20;       colorIndex ==
+&#x20;       6
+&#x20;   )
+&#x20;   {
+&#x20;       return float4(
+&#x20;           0.6275,
+&#x20;           0.1255,
+&#x20;           0.9412,
+&#x20;           1
+&#x20;       );
+&#x20;   }
+
+&#x20;   return float4(
+&#x20;       1,
+&#x20;       1,
+&#x20;       1,
+&#x20;       1
+&#x20;   );
+}
+
+VSOutput main(
+&#x20;   uint vertexID :
+&#x20;   SV\_VertexID
+)
+{
+&#x20;   Cell cell =
+&#x20;       Cells[
+&#x20;           vertexID
+&#x20;       ];
+
+&#x20;   float screenX =
+&#x20;       (
+&#x20;           cell.x -
+&#x20;           CameraX
+&#x20;       ) \*
+&#x20;       Zoom;
+
+&#x20;   float screenY =
+&#x20;       (
+&#x20;           cell.y -
+&#x20;           CameraY
+&#x20;       ) \*
+&#x20;       Zoom;
+
+&#x20;   VSOutput output;
+
+&#x20;   output.position =
+&#x20;       float4(
+&#x20;           screenX /
+&#x20;           (
+&#x20;               Width \*
+&#x20;               0.5
+&#x20;           ),
+
+&#x20;           -screenY /
+&#x20;           (
+&#x20;               Height \*
+&#x20;               0.5
+&#x20;           ),
+
+&#x20;           0.0,
+&#x20;           1.0
+&#x20;       );
+
+&#x20;   output.color =
+&#x20;       GetColor(
+&#x20;           cell.colorIndex
+&#x20;       );
+
+&#x20;   return output;
+}
+
+)";
+
+// ============================================================
+// CELL GEOMETRY SHADER
+// ============================================================
+
+const char\* cellGeometryShaderSource = R"(
+
+struct VSOutput
+{
+&#x20;   float4 position : SV\_POSITION;
+
+&#x20;   float4 color : COLOR0;
+};
+
+struct GSOutput
+{
+&#x20;   float4 position : SV\_POSITION;
+
+&#x20;   float4 color : COLOR0;
+
+&#x20;   float2 uv : TEXCOORD0;
+};
+
+cbuffer RenderConstants : register(b0)
+{
+&#x20;   float CameraX;
+&#x20;   float CameraY;
+
+&#x20;   float Zoom;
+&#x20;   float Width;
+
+&#x20;   float Height;
+&#x20;   float PixelRadius;
+
+&#x20;   float Padding0;
+&#x20;   float Padding1;
+};
+
+[maxvertexcount(4)]
+void main(
+&#x20;   point VSOutput input[1],
+
+&#x20;   inout TriangleStream\<GSOutput>
+&#x20;   output
+)
+{
+&#x20;   float radiusX =
+&#x20;       PixelRadius /
+&#x20;       (
+&#x20;           Width \*
+&#x20;           0.5
+&#x20;       );
+
+&#x20;   float radiusY =
+&#x20;       PixelRadius /
+&#x20;       (
+&#x20;           Height \*
+&#x20;           0.5
+&#x20;       );
+
+&#x20;   float4 center =
+&#x20;       input[0].position;
+
+&#x20;   GSOutput vertex;
+
+&#x20;   vertex.color =
+&#x20;       input[0].color;
+
+&#x20;   vertex.position =
+&#x20;       center +
+&#x20;       float4(
+&#x20;           -radiusX,
+&#x20;           -radiusY,
+&#x20;           0,
+&#x20;           0
+&#x20;       );
+
+&#x20;   vertex.uv =
+&#x20;       float2(
+&#x20;           -1,
+&#x20;           -1
+&#x20;       );
+
+&#x20;   output.Append(
+&#x20;       vertex
+&#x20;   );
+
+&#x20;   vertex.position =
+&#x20;       center +
+&#x20;       float4(
+&#x20;           -radiusX,
+&#x20;           radiusY,
+&#x20;           0,
+&#x20;           0
+&#x20;       );
+
+&#x20;   vertex.uv =
+&#x20;       float2(
+&#x20;           -1,
+&#x20;           1
+&#x20;       );
+
+&#x20;   output.Append(
+&#x20;       vertex
+&#x20;   );
+
+&#x20;   vertex.position =
+&#x20;       center +
+&#x20;       float4(
+&#x20;           radiusX,
+&#x20;           -radiusY,
+&#x20;           0,
+&#x20;           0
+&#x20;       );
+
+&#x20;   vertex.uv =
+&#x20;       float2(
+&#x20;           1,
+&#x20;           -1
+&#x20;       );
+
+&#x20;   output.Append(
+&#x20;       vertex
+&#x20;   );
+
+&#x20;   vertex.position =
+&#x20;       center +
+&#x20;       float4(
+&#x20;           radiusX,
+&#x20;           radiusY,
+&#x20;           0,
+&#x20;           0
+&#x20;       );
+
+&#x20;   vertex.uv =
+&#x20;       float2(
+&#x20;           1,
+&#x20;           1
+&#x20;       );
+
+&#x20;   output.Append(
+&#x20;       vertex
+&#x20;   );
+}
+
+)";
+
+// ============================================================
+// CELL PIXEL SHADER
+// ============================================================
+
+const char\* cellPixelShaderSource = R"(
+
+struct PSInput
+{
+&#x20;   float4 position : SV\_POSITION;
+
+&#x20;   float4 color : COLOR0;
+
+&#x20;   float2 uv : TEXCOORD0;
+};
+
+float4 main(
+&#x20;   PSInput input
+) : SV\_TARGET
+{
+&#x20;   float distanceSquared =
+&#x20;       dot(
+&#x20;           input.uv,
+&#x20;           input.uv
+&#x20;       );
+
+&#x20;   if (
+&#x20;       distanceSquared >
+&#x20;       1.0
+&#x20;   )
+&#x20;   {
+&#x20;       discard;
+&#x20;   }
+
+&#x20;   return input.color;
+}
+
+)";
+
+// ============================================================
+// WALL VERTEX SHADER
+// ============================================================
+
+const char\* wallVertexShaderSource = R"(
+
+struct VSInput
+{
+&#x20;   float2 position : POSITION;
+};
+
+struct VSOutput
+{
+&#x20;   float4 position : SV\_POSITION;
+};
+
+cbuffer RenderConstants : register(b0)
+{
+&#x20;   float CameraX;
+&#x20;   float CameraY;
+
+&#x20;   float Zoom;
+&#x20;   float Width;
+
+&#x20;   float Height;
+&#x20;   float PixelRadius;
+
+&#x20;   float Padding0;
+&#x20;   float Padding1;
+};
+
+VSOutput main(
+&#x20;   VSInput input
+)
+{
+&#x20;   float screenX =
+&#x20;       (
+&#x20;           input.position.x -
+&#x20;           CameraX
+&#x20;       ) \*
+&#x20;       Zoom;
+
+&#x20;   float screenY =
+&#x20;       (
+&#x20;           input.position.y -
+&#x20;           CameraY
+&#x20;       ) \*
+&#x20;       Zoom;
+
+&#x20;   VSOutput output;
+
+&#x20;   output.position =
+&#x20;       float4(
+&#x20;           screenX /
+&#x20;           (
+&#x20;               Width \*
+&#x20;               0.5
+&#x20;           ),
+
+&#x20;           -screenY /
+&#x20;           (
+&#x20;               Height \*
+&#x20;               0.5
+&#x20;           ),
+
+&#x20;           0.0,
+&#x20;           1.0
+&#x20;       );
+
+&#x20;   return output;
+}
+
+)";
+
+// ============================================================
+// WALL PIXEL SHADER
+// ============================================================
+
+const char\* wallPixelShaderSource = R"(
+
+float4 main() : SV\_TARGET
+{
+&#x20;   return float4(
+&#x20;       1,
+&#x20;       1,
+&#x20;       1,
+&#x20;       1
+&#x20;   );
+}
+
+)";
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+template\<typename T>
+void safeRelease(
+&#x20;   T\*& object
+)
+{
+&#x20;   if (
+&#x20;       object
+&#x20;       )
+&#x20;   {
+&#x20;       object->Release();
+
+&#x20;       object =
+&#x20;           nullptr;
+&#x20;   }
+}
+
+HMENU controlId(
+&#x20;   int id
+)
+{
+&#x20;   return reinterpret\_cast\<HMENU>(
+&#x20;       static\_cast\<INT\_PTR>(
+&#x20;           id
+&#x20;           )
+&#x20;       );
+}
+
+HWND createButton(
+&#x20;   HWND parent,
+
+&#x20;   const char\* text,
+
+&#x20;   int x,
+&#x20;   int y,
+
+&#x20;   int width,
+&#x20;   int height,
+
+&#x20;   int id
+)
+{
+&#x20;   return CreateWindowA(
+&#x20;       "BUTTON",
+
+&#x20;       text,
+
+&#x20;       WS\_VISIBLE |
+&#x20;       WS\_CHILD |
+&#x20;       BS\_PUSHBUTTON,
+
+&#x20;       x,
+&#x20;       y,
+
+&#x20;       width,
+&#x20;       height,
+
+&#x20;       parent,
+
+&#x20;       controlId(
+&#x20;           id
+&#x20;       ),
+
+&#x20;       GetModuleHandleA(
+&#x20;           nullptr
+&#x20;       ),
+
+&#x20;       nullptr
+&#x20;   );
+}
+
+HWND createStaticText(
+&#x20;   HWND parent,
+
+&#x20;   const char\* text,
+
+&#x20;   int x,
+&#x20;   int y,
+
+&#x20;   int width,
+&#x20;   int height
+)
+{
+&#x20;   return CreateWindowA(
+&#x20;       "STATIC",
+
+&#x20;       text,
+
+&#x20;       WS\_VISIBLE |
+&#x20;       WS\_CHILD |
+&#x20;       SS\_CENTERIMAGE,
+
+&#x20;       x,
+&#x20;       y,
+
+&#x20;       width,
+&#x20;       height,
+
+&#x20;       parent,
+
+&#x20;       nullptr,
+
+&#x20;       GetModuleHandleA(
+&#x20;           nullptr
+&#x20;       ),
+
+&#x20;       nullptr
+&#x20;   );
+}
+
+void setButtonText(
+&#x20;   int id,
+&#x20;   const char\* text
+)
+{
+&#x20;   HWND button =
+&#x20;       GetDlgItem(
+&#x20;           mainWindow,
+&#x20;           id
+&#x20;       );
+
+&#x20;   if (
+&#x20;       button
+&#x20;       )
+&#x20;   {
+&#x20;       SetWindowTextA(
+&#x20;           button,
+&#x20;           text
+&#x20;       );
+&#x20;   }
+}
+
+// ============================================================
+// SHADER COMPILATION
+// ============================================================
+
+bool compileShader(
+&#x20;   const char\* source,
+
+&#x20;   const char\* entryPoint,
+
+&#x20;   const char\* target,
+
+&#x20;   ID3DBlob\*\* blob
+)
+{
+&#x20;   ID3DBlob\* errorBlob =
+&#x20;       nullptr;
+
+&#x20;   HRESULT result =
+&#x20;       D3DCompile(
+&#x20;           source,
+
+&#x20;           strlen(
+&#x20;               source
+&#x20;           ),
+
+&#x20;           nullptr,
+&#x20;           nullptr,
+&#x20;           nullptr,
+
+&#x20;           entryPoint,
+
+&#x20;           target,
+
+&#x20;           D3DCOMPILE\_ENABLE\_STRICTNESS,
+
+&#x20;           0,
+
+&#x20;           blob,
+
+&#x20;           &errorBlob
+&#x20;       );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       if (
+&#x20;           errorBlob
+&#x20;           )
+&#x20;       {
+&#x20;           MessageBoxA(
+&#x20;               mainWindow,
+
+&#x20;               static\_cast\<const char\*>(
+&#x20;                   errorBlob->
+&#x20;                   GetBufferPointer()
+&#x20;                   ),
+
+&#x20;               "Shader Compilation Error",
+
+&#x20;               MB\_ICONERROR
+&#x20;           );
+
+&#x20;           errorBlob->
+&#x20;               Release();
+&#x20;       }
+
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   safeRelease(
+&#x20;       errorBlob
+&#x20;   );
+
+&#x20;   return true;
+}
+
+// ============================================================
+// CONSTANT BUFFER
+// ============================================================
+
+bool createConstantBuffer(
+&#x20;   UINT size,
+
+&#x20;   ID3D11Buffer\*\* buffer
+)
+{
+&#x20;   D3D11\_BUFFER\_DESC desc = {};
+
+&#x20;   desc.ByteWidth =
+&#x20;       size;
+
+&#x20;   desc.Usage =
+&#x20;       D3D11\_USAGE\_DEFAULT;
+
+&#x20;   desc.BindFlags =
+&#x20;       D3D11\_BIND\_CONSTANT\_BUFFER;
+
+&#x20;   return SUCCEEDED(
+&#x20;       gpuDevice->
+&#x20;       CreateBuffer(
+&#x20;           &desc,
+&#x20;           nullptr,
+&#x20;           buffer
+&#x20;       )
+&#x20;   );
+}
+
+// ============================================================
+// STRUCTURED BUFFER
+// ============================================================
+
+bool createStructuredBuffer(
+&#x20;   UINT elementSize,
+
+&#x20;   UINT elementCount,
+
+&#x20;   UINT bindFlags,
+
+&#x20;   ID3D11Buffer\*\* buffer,
+
+&#x20;   ID3D11ShaderResourceView\*\* srv,
+
+&#x20;   ID3D11UnorderedAccessView\*\* uav
+)
+{
+&#x20;   D3D11\_BUFFER\_DESC desc = {};
+
+&#x20;   desc.ByteWidth =
+&#x20;       elementSize \*
+&#x20;       elementCount;
+
+&#x20;   desc.Usage =
+&#x20;       D3D11\_USAGE\_DEFAULT;
+
+&#x20;   desc.BindFlags =
+&#x20;       bindFlags;
+
+&#x20;   desc.MiscFlags =
+&#x20;       D3D11\_RESOURCE\_MISC\_BUFFER\_STRUCTURED;
+
+&#x20;   desc.StructureByteStride =
+&#x20;       elementSize;
+
+&#x20;   HRESULT result =
+&#x20;       gpuDevice->
+&#x20;       CreateBuffer(
+&#x20;           &desc,
+&#x20;           nullptr,
+&#x20;           buffer
+&#x20;       );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   if (
+&#x20;       srv &&
+&#x20;       (
+&#x20;           bindFlags &
+&#x20;           D3D11\_BIND\_SHADER\_RESOURCE
+&#x20;           )
+&#x20;       )
+&#x20;   {
+&#x20;       D3D11\_SHADER\_RESOURCE\_VIEW\_DESC
+&#x20;           srvDesc = {};
+
+&#x20;       srvDesc.Format =
+&#x20;           DXGI\_FORMAT\_UNKNOWN;
+
+&#x20;       srvDesc.ViewDimension =
+&#x20;           D3D11\_SRV\_DIMENSION\_BUFFER;
+
+&#x20;       srvDesc.Buffer.FirstElement =
+&#x20;           0;
+
+&#x20;       srvDesc.Buffer.NumElements =
+&#x20;           elementCount;
+
+&#x20;       result =
+&#x20;           gpuDevice->
+&#x20;           CreateShaderResourceView(
+&#x20;               \*buffer,
+&#x20;               &srvDesc,
+&#x20;               srv
+&#x20;           );
+
+&#x20;       if (
+&#x20;           FAILED(
+&#x20;               result
+&#x20;           )
+&#x20;           )
+&#x20;       {
+&#x20;           return false;
+&#x20;       }
+&#x20;   }
+
+&#x20;   if (
+&#x20;       uav &&
+&#x20;       (
+&#x20;           bindFlags &
+&#x20;           D3D11\_BIND\_UNORDERED\_ACCESS
+&#x20;           )
+&#x20;       )
+&#x20;   {
+&#x20;       D3D11\_UNORDERED\_ACCESS\_VIEW\_DESC
+&#x20;           uavDesc = {};
+
+&#x20;       uavDesc.Format =
+&#x20;           DXGI\_FORMAT\_UNKNOWN;
+
+&#x20;       uavDesc.ViewDimension =
+&#x20;           D3D11\_UAV\_DIMENSION\_BUFFER;
+
+&#x20;       uavDesc.Buffer.FirstElement =
+&#x20;           0;
+
+&#x20;       uavDesc.Buffer.NumElements =
+&#x20;           elementCount;
+
+&#x20;       result =
+&#x20;           gpuDevice->
+&#x20;           CreateUnorderedAccessView(
+&#x20;               \*buffer,
+&#x20;               &uavDesc,
+&#x20;               uav
+&#x20;           );
+
+&#x20;       if (
+&#x20;           FAILED(
+&#x20;               result
+&#x20;           )
+&#x20;           )
+&#x20;       {
+&#x20;           return false;
+&#x20;       }
+&#x20;   }
+
+&#x20;   return true;
+}
+
+// ============================================================
+// CELL BUFFERS
+// ============================================================
+
+bool createCellBuffers(
+&#x20;   size\_t capacity
+)
+{
+&#x20;   safeRelease(
+&#x20;       gpuCellSRV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellUAV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellBuffer
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellScratchSRV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellScratchUAV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellScratchBuffer
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellStaging
+&#x20;   );
+
+&#x20;   if (
+&#x20;       capacity ==
+&#x20;       0
+&#x20;       )
+&#x20;   {
+&#x20;       gpuCellCapacity =
+&#x20;           0;
+
+&#x20;       return true;
+&#x20;   }
+
+&#x20;   const UINT bindFlags =
+&#x20;       D3D11\_BIND\_SHADER\_RESOURCE |
+&#x20;       D3D11\_BIND\_UNORDERED\_ACCESS;
+
+&#x20;   if (
+&#x20;       !createStructuredBuffer(
+&#x20;           sizeof(
+&#x20;               GPUCell
+&#x20;               ),
+
+&#x20;           static\_cast\<UINT>(
+&#x20;               capacity
+&#x20;               ),
+
+&#x20;           bindFlags,
+
+&#x20;           &gpuCellBuffer,
+
+&#x20;           &gpuCellSRV,
+
+&#x20;           &gpuCellUAV
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   if (
+&#x20;       !createStructuredBuffer(
+&#x20;           sizeof(
+&#x20;               GPUCell
+&#x20;               ),
+
+&#x20;           static\_cast\<UINT>(
+&#x20;               capacity
+&#x20;               ),
+
+&#x20;           bindFlags,
+
+&#x20;           &gpuCellScratchBuffer,
+
+&#x20;           &gpuCellScratchSRV,
+
+&#x20;           &gpuCellScratchUAV
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   D3D11\_BUFFER\_DESC
+&#x20;       stagingDesc = {};
+
+&#x20;   stagingDesc.ByteWidth =
+&#x20;       static\_cast\<UINT>(
+&#x20;           sizeof(
+&#x20;               GPUCell
+&#x20;               ) \*
+&#x20;           capacity
+&#x20;           );
+
+&#x20;   stagingDesc.Usage =
+&#x20;       D3D11\_USAGE\_STAGING;
+
+&#x20;   stagingDesc.CPUAccessFlags =
+&#x20;       D3D11\_CPU\_ACCESS\_READ;
+
+&#x20;   HRESULT result =
+&#x20;       gpuDevice->
+&#x20;       CreateBuffer(
+&#x20;           &stagingDesc,
+&#x20;           nullptr,
+&#x20;           &gpuCellStaging
+&#x20;       );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   gpuCellCapacity =
+&#x20;       capacity;
+
+&#x20;   return true;
+}
+
+// ============================================================
+// NEXT BUFFER
+// ============================================================
+
+bool createNextBuffer(
+&#x20;   size\_t capacity
+)
+{
+&#x20;   safeRelease(
+&#x20;       gpuNextSRV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuNextUAV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuNextBuffer
+&#x20;   );
+
+&#x20;   if (
+&#x20;       capacity ==
+&#x20;       0
+&#x20;       )
+&#x20;   {
+&#x20;       return true;
+&#x20;   }
+
+&#x20;   return createStructuredBuffer(
+&#x20;       sizeof(
+&#x20;           int
+&#x20;           ),
+
+&#x20;       static\_cast\<UINT>(
+&#x20;           capacity
+&#x20;           ),
+
+&#x20;       D3D11\_BIND\_SHADER\_RESOURCE |
+&#x20;       D3D11\_BIND\_UNORDERED\_ACCESS,
+
+&#x20;       &gpuNextBuffer,
+
+&#x20;       &gpuNextSRV,
+
+&#x20;       &gpuNextUAV
+&#x20;   );
+}
+
+// ============================================================
+// GRID BUFFER
+// ============================================================
+
+bool createGridBuffer()
+{
+&#x20;   return createStructuredBuffer(
+&#x20;       sizeof(
+&#x20;           int
+&#x20;           ),
+
+&#x20;       GPU\_GRID\_BUCKET\_COUNT,
+
+&#x20;       D3D11\_BIND\_SHADER\_RESOURCE |
+&#x20;       D3D11\_BIND\_UNORDERED\_ACCESS,
+
+&#x20;       &gpuGridHeadsBuffer,
+
+&#x20;       &gpuGridHeadsSRV,
+
+&#x20;       &gpuGridHeadsUAV
+&#x20;   );
+}
+
+// ============================================================
+// WALL BUFFER
+// ============================================================
+
+bool createWallBuffer()
+{
+&#x20;   D3D11\_BUFFER\_DESC desc = {};
+
+&#x20;   desc.ByteWidth =
+&#x20;       sizeof(
+&#x20;           WallVertex
+&#x20;           ) \*
+&#x20;       8;
+
+&#x20;   desc.Usage =
+&#x20;       D3D11\_USAGE\_DYNAMIC;
+
+&#x20;   desc.BindFlags =
+&#x20;       D3D11\_BIND\_VERTEX\_BUFFER;
+
+&#x20;   desc.CPUAccessFlags =
+&#x20;       D3D11\_CPU\_ACCESS\_WRITE;
+
+&#x20;   return SUCCEEDED(
+&#x20;       gpuDevice->
+&#x20;       CreateBuffer(
+&#x20;           &desc,
+&#x20;           nullptr,
+&#x20;           &gpuWallVertexBuffer
+&#x20;       )
+&#x20;   );
+}
+
+// ============================================================
+// RENDER TARGET
+// ============================================================
+
+bool createRenderTarget()
+{
+&#x20;   safeRelease(
+&#x20;       gpuRenderTarget
+&#x20;   );
+
+&#x20;   ID3D11Texture2D\* backBuffer =
+&#x20;       nullptr;
+
+&#x20;   HRESULT result =
+&#x20;       gpuSwapChain->
+&#x20;       GetBuffer(
+&#x20;           0,
+
+&#x20;           \_\_uuidof(
+&#x20;               ID3D11Texture2D
+&#x20;               ),
+
+&#x20;           reinterpret\_cast\<void\*\*>(
+&#x20;               &backBuffer
+&#x20;               )
+&#x20;       );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   result =
+&#x20;       gpuDevice->
+&#x20;       CreateRenderTargetView(
+&#x20;           backBuffer,
+
+&#x20;           nullptr,
+
+&#x20;           &gpuRenderTarget
+&#x20;       );
+
+&#x20;   backBuffer->
+&#x20;       Release();
+
+&#x20;   return SUCCEEDED(
+&#x20;       result
+&#x20;   );
+}
+
+// ============================================================
+// RESIZE
+// ============================================================
+
+void resizeD3D(
+&#x20;   int width,
+&#x20;   int height
+)
+{
+&#x20;   if (
+&#x20;       !gpuInitialized ||
+&#x20;       width <=
+&#x20;       0 ||
+&#x20;       height <=
+&#x20;       0
+&#x20;       )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   gpuContext->
+&#x20;       OMSetRenderTargets(
+&#x20;           0,
+&#x20;           nullptr,
+&#x20;           nullptr
+&#x20;       );
+
+&#x20;   safeRelease(
+&#x20;       gpuRenderTarget
+&#x20;   );
+
+&#x20;   gpuSwapChain->
+&#x20;       ResizeBuffers(
+&#x20;           0,
+
+&#x20;           width,
+&#x20;           height,
+
+&#x20;           DXGI\_FORMAT\_UNKNOWN,
+
+&#x20;           0
+&#x20;       );
+
+&#x20;   createRenderTarget();
+}
+
+// ============================================================
+// TRUE SPEED SCALE
+// ============================================================
+
+float getSimulationTimeScale()
+{
+&#x20;   if (
+&#x20;       !trueSpeedEnabled
+&#x20;       )
+&#x20;   {
+&#x20;       return 1.0f;
+&#x20;   }
+
+&#x20;   return
+&#x20;       static\_cast\<float>(
+&#x20;           processSpeed
+&#x20;           ) /
+&#x20;       60.0f;
+}
+
+// ============================================================
+// UPDATE GPU SETTINGS
+// ============================================================
+
+void updateGPUSettings()
+{
+&#x20;   if (
+&#x20;       !gpuInitialized
+&#x20;       )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   if (
+&#x20;       gpuSimulationConstantBuffer
+&#x20;       )
+&#x20;   {
+&#x20;       GPUSimulationConstants
+&#x20;           constants = {};
+
+&#x20;       for (
+&#x20;           int from = 0;
+&#x20;           from < COLOR\_COUNT;
+&#x20;           ++from
+&#x20;           )
+&#x20;       {
+&#x20;           for (
+&#x20;               int to = 0;
+&#x20;               to < COLOR\_COUNT;
+&#x20;               ++to
+&#x20;               )
+&#x20;           {
+&#x20;               int block =
+&#x20;                   to /
+&#x20;                   4;
+
+&#x20;               int component =
+&#x20;                   to %
+&#x20;                   4;
+
+&#x20;               constants.attraction[
+&#x20;                   from
+&#x20;               ][
+&#x20;                   block
+&#x20;               ][
+&#x20;                   component
+&#x20;               ] =
+&#x20;                       static\_cast\<float>(
+&#x20;                           attractionSettings[
+&#x20;                               from
+&#x20;                           ][
+&#x20;                               to
+&#x20;                           ]
+&#x20;                                   );
+
+&#x20;                   constants.attractionRange[
+&#x20;                       from
+&#x20;                   ][
+&#x20;                       block
+&#x20;                   ][
+&#x20;                       component
+&#x20;                   ] =
+&#x20;                           static\_cast\<float>(
+&#x20;                               attractionRangeSettings[
+&#x20;                                   from
+&#x20;                               ][
+&#x20;                                   to
+&#x20;                               ]
+&#x20;                                       );
+&#x20;           }
+&#x20;       }
+
+&#x20;       constants.maximumSpeed =
+&#x20;           static\_cast\<float>(
+&#x20;               maximumSpeed
+&#x20;               );
+
+&#x20;       constants.attractionForce =
+&#x20;           static\_cast\<float>(
+&#x20;               ATTRACTION\_FORCE
+&#x20;               );
+
+&#x20;       constants.wallSize =
+&#x20;           static\_cast\<float>(
+&#x20;               wallSize
+&#x20;               );
+
+&#x20;       constants.friction =
+&#x20;           static\_cast\<float>(
+&#x20;               friction
+&#x20;               );
+
+&#x20;       constants.realisticForceEnabled =
+&#x20;           realisticForceEnabled
+&#x20;           ? 1
+&#x20;           : 0;
+
+&#x20;       constants.cellCount =
+&#x20;           gpuCellCount;
+
+&#x20;       constants.timeScale =
+&#x20;           getSimulationTimeScale();
+
+&#x20;       constants.padding0 =
+&#x20;           0.0f;
+
+&#x20;       gpuContext->
+&#x20;           UpdateSubresource(
+&#x20;               gpuSimulationConstantBuffer,
+
+&#x20;               0,
+
+&#x20;               nullptr,
+
+&#x20;               &constants,
+
+&#x20;               0,
+&#x20;               0
+&#x20;           );
+&#x20;   }
+
+&#x20;   if (
+&#x20;       gpuGridConstantBuffer
+&#x20;       )
+&#x20;   {
+&#x20;       GPUGridConstants
+&#x20;           constants = {};
+
+&#x20;       constants.cellCount =
+&#x20;           gpuCellCount;
+
+&#x20;       gpuContext->
+&#x20;           UpdateSubresource(
+&#x20;               gpuGridConstantBuffer,
+
+&#x20;               0,
+
+&#x20;               nullptr,
+
+&#x20;               &constants,
+
+&#x20;               0,
+&#x20;               0
+&#x20;           );
+&#x20;   }
+}
+
+// ============================================================
+// UPLOAD CELLS
+// ============================================================
+
+bool uploadCellsToGPU()
+{
+&#x20;   if (
+&#x20;       !gpuInitialized
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   gpuCellCount =
+&#x20;       static\_cast\<int>(
+&#x20;           cells.size()
+&#x20;           );
+
+&#x20;   if (
+&#x20;       gpuCellCount <=
+&#x20;       0
+&#x20;       )
+&#x20;   {
+&#x20;       updateGPUSettings();
+
+&#x20;       return true;
+&#x20;   }
+
+&#x20;   if (
+&#x20;       static\_cast\<size\_t>(
+&#x20;           gpuCellCount
+&#x20;           ) >
+&#x20;       gpuCellCapacity
+&#x20;       )
+&#x20;   {
+&#x20;       size\_t newCapacity =
+&#x20;           1;
+
+&#x20;       while (
+&#x20;           newCapacity <
+&#x20;           static\_cast\<size\_t>(
+&#x20;               gpuCellCount
+&#x20;               )
+&#x20;           )
+&#x20;       {
+&#x20;           newCapacity \*=
+&#x20;               2;
+&#x20;       }
+
+&#x20;       if (
+&#x20;           !createCellBuffers(
+&#x20;               newCapacity
+&#x20;           ) ||
+&#x20;           !createNextBuffer(
+&#x20;               newCapacity
+&#x20;           )
+&#x20;           )
+&#x20;       {
+&#x20;           return false;
+&#x20;       }
+&#x20;   }
+
+&#x20;   std::vector\<GPUCell>
+&#x20;       gpuCells(
+&#x20;           cells.size()
+&#x20;       );
+
+&#x20;   for (
+&#x20;       size\_t i = 0;
+&#x20;       i < cells.size();
+&#x20;       ++i
+&#x20;       )
+&#x20;   {
+&#x20;       gpuCells[i].x =
+&#x20;           static\_cast\<float>(
+&#x20;               cells[i].x
+&#x20;               );
+
+&#x20;       gpuCells[i].y =
+&#x20;           static\_cast\<float>(
+&#x20;               cells[i].y
+&#x20;               );
+
+&#x20;       gpuCells[i].vx =
+&#x20;           static\_cast\<float>(
+&#x20;               cells[i].vx
+&#x20;               );
+
+&#x20;       gpuCells[i].vy =
+&#x20;           static\_cast\<float>(
+&#x20;               cells[i].vy
+&#x20;               );
+
+&#x20;       gpuCells[i].colorIndex =
+&#x20;           cells[i].colorIndex;
+
+&#x20;       gpuCells[i].padding0 =
+&#x20;           0.0f;
+
+&#x20;       gpuCells[i].padding1 =
+&#x20;           0.0f;
+
+&#x20;       gpuCells[i].padding2 =
+&#x20;           0.0f;
+&#x20;   }
+
+&#x20;   D3D11\_BOX box = {};
+
+&#x20;   box.left =
+&#x20;       0;
+
+&#x20;   box.right =
+&#x20;       static\_cast\<UINT>(
+&#x20;           sizeof(
+&#x20;               GPUCell
+&#x20;               ) \*
+&#x20;           gpuCells.size()
+&#x20;           );
+
+&#x20;   box.top =
+&#x20;       0;
+
+&#x20;   box.bottom =
+&#x20;       1;
+
+&#x20;   box.front =
+&#x20;       0;
+
+&#x20;   box.back =
+&#x20;       1;
+
+&#x20;   gpuContext->
+&#x20;       UpdateSubresource(
+&#x20;           gpuCellBuffer,
+
+&#x20;           0,
+
+&#x20;           &box,
+
+&#x20;           gpuCells.data(),
+
+&#x20;           0,
+&#x20;           0
+&#x20;       );
+
+&#x20;   updateGPUSettings();
+
+&#x20;   return true;
+}
+
+// ============================================================
+// CLEAR COMPUTE BINDINGS
+// ============================================================
+
+void clearComputeBindings()
+{
+&#x20;   gpuContext->
+&#x20;       CSSetShader(
+&#x20;           nullptr,
+&#x20;           nullptr,
+&#x20;           0
+&#x20;       );
+
+&#x20;   ID3D11ShaderResourceView\*
+&#x20;       nullSRV[3] =
+&#x20;   {
+&#x20;       nullptr,
+&#x20;       nullptr,
+&#x20;       nullptr
+&#x20;   };
+
+&#x20;   gpuContext->
+&#x20;       CSSetShaderResources(
+&#x20;           0,
+&#x20;           3,
+&#x20;           nullSRV
+&#x20;       );
+
+&#x20;   ID3D11UnorderedAccessView\*
+&#x20;       nullUAV[3] =
+&#x20;   {
+&#x20;       nullptr,
+&#x20;       nullptr,
+&#x20;       nullptr
+&#x20;   };
+
+&#x20;   gpuContext->
+&#x20;       CSSetUnorderedAccessViews(
+&#x20;           0,
+&#x20;           3,
+&#x20;           nullUAV,
+&#x20;           nullptr
+&#x20;       );
+
+&#x20;   ID3D11Buffer\*
+&#x20;       nullCB =
+&#x20;       nullptr;
+
+&#x20;   gpuContext->
+&#x20;       CSSetConstantBuffers(
+&#x20;           0,
+&#x20;           1,
+&#x20;           &nullCB
+&#x20;       );
+}
+
+// ============================================================
+// GPU -> CPU
+// ============================================================
+
+bool syncCPUFromGPU()
+{
+&#x20;   if (
+&#x20;       !gpuInitialized ||
+&#x20;       gpuCellCount <=
+&#x20;       0 ||
+&#x20;       !gpuCellBuffer ||
+&#x20;       !gpuCellStaging
+&#x20;       )
+&#x20;   {
+&#x20;       return true;
+&#x20;   }
+
+&#x20;   clearComputeBindings();
+
+&#x20;   ID3D11ShaderResourceView\*
+&#x20;       nullVS =
+&#x20;       nullptr;
+
+&#x20;   gpuContext->
+&#x20;       VSSetShaderResources(
+&#x20;           0,
+&#x20;           1,
+&#x20;           &nullVS
+&#x20;       );
+
+&#x20;   gpuContext->
+&#x20;       CopyResource(
+&#x20;           gpuCellStaging,
+&#x20;           gpuCellBuffer
+&#x20;       );
+
+&#x20;   D3D11\_MAPPED\_SUBRESOURCE
+&#x20;       mapped = {};
+
+&#x20;   HRESULT result =
+&#x20;       gpuContext->
+&#x20;       Map(
+&#x20;           gpuCellStaging,
+
+&#x20;           0,
+
+&#x20;           D3D11\_MAP\_READ,
+
+&#x20;           0,
+
+&#x20;           &mapped
+&#x20;       );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   GPUCell\* gpuData =
+&#x20;       static\_cast\<GPUCell\*>(
+&#x20;           mapped.pData
+&#x20;           );
+
+&#x20;   cells.resize(
+&#x20;       static\_cast\<size\_t>(
+&#x20;           gpuCellCount
+&#x20;           )
+&#x20;   );
+
+&#x20;   for (
+&#x20;       int i = 0;
+&#x20;       i < gpuCellCount;
+&#x20;       ++i
+&#x20;       )
+&#x20;   {
+&#x20;       cells[i].x =
+&#x20;           static\_cast\<double>(
+&#x20;               gpuData[i].x
+&#x20;               );
+
+&#x20;       cells[i].y =
+&#x20;           static\_cast\<double>(
+&#x20;               gpuData[i].y
+&#x20;               );
+
+&#x20;       cells[i].vx =
+&#x20;           static\_cast\<double>(
+&#x20;               gpuData[i].vx
+&#x20;               );
+
+&#x20;       cells[i].vy =
+&#x20;           static\_cast\<double>(
+&#x20;               gpuData[i].vy
+&#x20;               );
+
+&#x20;       cells[i].colorIndex =
+&#x20;           gpuData[i].colorIndex;
+
+&#x20;       if (
+&#x20;           cells[i].colorIndex >=
+&#x20;           0 &&
+&#x20;           cells[i].colorIndex <
+&#x20;           COLOR\_COUNT
+&#x20;           )
+&#x20;       {
+&#x20;           cells[i].color =
+&#x20;               cellColors[
+&#x20;                   cells[i].colorIndex
+&#x20;               ];
+&#x20;       }
+&#x20;   }
+
+&#x20;   gpuContext->
+&#x20;       Unmap(
+&#x20;           gpuCellStaging,
+&#x20;           0
+&#x20;       );
+
+&#x20;   return true;
+}
+
+// ============================================================
+// GPU SIMULATION STEP
+// ============================================================
+
+void simulationStepGPU()
+{
+&#x20;   if (
+&#x20;       !gpuInitialized ||
+&#x20;       gpuCellCount <=
+&#x20;       0
+&#x20;       )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   const UINT emptyGrid[4] =
+&#x20;   {
+&#x20;       0xFFFFFFFFu,
+&#x20;       0xFFFFFFFFu,
+&#x20;       0xFFFFFFFFu,
+&#x20;       0xFFFFFFFFu
+&#x20;   };
+
+&#x20;   gpuContext->
+&#x20;       ClearUnorderedAccessViewUint(
+&#x20;           gpuGridHeadsUAV,
+&#x20;           emptyGrid
+&#x20;       );
+
+&#x20;   // ========================================================
+&#x20;   // BUILD GRID
+&#x20;   // ========================================================
+
+&#x20;   gpuContext->
+&#x20;       CSSetShader(
+&#x20;           gpuBuildGridShader,
+&#x20;           nullptr,
+&#x20;           0
+&#x20;       );
+
+&#x20;   gpuContext->
+&#x20;       CSSetShaderResources(
+&#x20;           0,
+&#x20;           1,
+&#x20;           &gpuCellSRV
+&#x20;       );
+
+&#x20;   ID3D11UnorderedAccessView\*
+&#x20;       buildUAVs[2] =
+&#x20;   {
+&#x20;       gpuGridHeadsUAV,
+&#x20;       gpuNextUAV
+&#x20;   };
+
+&#x20;   gpuContext->
+&#x20;       CSSetUnorderedAccessViews(
+&#x20;           0,
+&#x20;           2,
+&#x20;           buildUAVs,
+&#x20;           nullptr
+&#x20;       );
+
+&#x20;   gpuContext->
+&#x20;       CSSetConstantBuffers(
+&#x20;           0,
+&#x20;           1,
+&#x20;           &gpuGridConstantBuffer
+&#x20;       );
+
+&#x20;   UINT cellGroups =
+&#x20;       (
+&#x20;           static\_cast\<UINT>(
+&#x20;               gpuCellCount
+&#x20;               ) +
+&#x20;           255
+&#x20;           ) /
+&#x20;       256;
+
+&#x20;   gpuContext->
+&#x20;       Dispatch(
+&#x20;           cellGroups,
+&#x20;           1,
+&#x20;           1
+&#x20;       );
+
+&#x20;   clearComputeBindings();
+
+&#x20;   // ========================================================
+&#x20;   // SIMULATION
+&#x20;   // ========================================================
+
+&#x20;   gpuContext->
+&#x20;       CSSetShader(
+&#x20;           gpuSimulationShader,
+&#x20;           nullptr,
+&#x20;           0
+&#x20;       );
+
+&#x20;   ID3D11ShaderResourceView\*
+&#x20;       simulationSRVs[3] =
+&#x20;   {
+&#x20;       gpuGridHeadsSRV,
+&#x20;       gpuNextSRV,
+&#x20;       gpuCellSRV
+&#x20;   };
+
+&#x20;   gpuContext->
+&#x20;       CSSetShaderResources(
+&#x20;           0,
+&#x20;           3,
+&#x20;           simulationSRVs
+&#x20;       );
+
+&#x20;   gpuContext->
+&#x20;       CSSetUnorderedAccessViews(
+&#x20;           0,
+&#x20;           1,
+&#x20;           &gpuCellScratchUAV,
+&#x20;           nullptr
+&#x20;       );
+
+&#x20;   gpuContext->
+&#x20;       CSSetConstantBuffers(
+&#x20;           0,
+&#x20;           1,
+&#x20;           &gpuSimulationConstantBuffer
+&#x20;       );
+
+&#x20;   gpuContext->
+&#x20;       Dispatch(
+&#x20;           cellGroups,
+&#x20;           1,
+&#x20;           1
+&#x20;       );
+
+&#x20;   clearComputeBindings();
+
+&#x20;   std::swap(
+&#x20;       gpuCellBuffer,
+&#x20;       gpuCellScratchBuffer
+&#x20;   );
+
+&#x20;   std::swap(
+&#x20;       gpuCellSRV,
+&#x20;       gpuCellScratchSRV
+&#x20;   );
+
+&#x20;   std::swap(
+&#x20;       gpuCellUAV,
+&#x20;       gpuCellScratchUAV
+&#x20;   );
+}
+
+// ============================================================
+// UPDATE SIMULATION
+// ============================================================
+
+void updateSimulation()
+{
+&#x20;   if (
+&#x20;       !simulationRunning ||
+&#x20;       !gpuInitialized ||
+&#x20;       gpuCellCount <=
+&#x20;       0
+&#x20;       )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   updateGPUSettings();
+
+&#x20;   if (
+&#x20;       trueSpeedEnabled
+&#x20;       )
+&#x20;   {
+&#x20;       simulationStepGPU();
+&#x20;   }
+&#x20;   else
+&#x20;   {
+&#x20;       stepAccumulator +=
+&#x20;           static\_cast\<double>(
+&#x20;               processSpeed
+&#x20;               ) /
+&#x20;           60.0;
+
+&#x20;       int steps =
+&#x20;           static\_cast\<int>(
+&#x20;               stepAccumulator
+&#x20;               );
+
+&#x20;       stepAccumulator -=
+&#x20;           steps;
+
+&#x20;       if (
+&#x20;           steps <
+&#x20;           1 &&
+&#x20;           processSpeed >=
+&#x20;           60
+&#x20;           )
+&#x20;       {
+&#x20;           steps =
+&#x20;               1;
+&#x20;       }
+
+&#x20;       steps =
+&#x20;           std::min(
+&#x20;               steps,
+&#x20;               10
+&#x20;           );
+
+&#x20;       for (
+&#x20;           int i = 0;
+&#x20;           i < steps;
+&#x20;           ++i
+&#x20;           )
+&#x20;       {
+&#x20;           simulationStepGPU();
+&#x20;       }
+&#x20;   }
+
+&#x20;   InvalidateRect(
+&#x20;       mainWindow,
+&#x20;       nullptr,
+&#x20;       FALSE
+&#x20;   );
+}
+
+// ============================================================
+// INITIALIZE D3D
+// ============================================================
+
+bool initializeD3D(
+&#x20;   HWND hwnd
+)
+{
+&#x20;   DXGI\_SWAP\_CHAIN\_DESC
+&#x20;       swapDesc = {};
+
+&#x20;   swapDesc.BufferCount =
+&#x20;       2;
+
+&#x20;   swapDesc.BufferDesc.Format =
+&#x20;       DXGI\_FORMAT\_R8G8B8A8\_UNORM;
+
+&#x20;   swapDesc.BufferUsage =
+&#x20;       DXGI\_USAGE\_RENDER\_TARGET\_OUTPUT;
+
+&#x20;   swapDesc.OutputWindow =
+&#x20;       hwnd;
+
+&#x20;   swapDesc.SampleDesc.Count =
+&#x20;       1;
+
+&#x20;   swapDesc.Windowed =
+&#x20;       TRUE;
+
+&#x20;   D3D\_FEATURE\_LEVEL
+&#x20;       featureLevels[] =
+&#x20;   {
+&#x20;       D3D\_FEATURE\_LEVEL\_11\_0
+&#x20;   };
+
+&#x20;   D3D\_FEATURE\_LEVEL
+&#x20;       featureLevel;
+
+&#x20;   HRESULT result =
+&#x20;       D3D11CreateDeviceAndSwapChain(
+&#x20;           nullptr,
+
+&#x20;           D3D\_DRIVER\_TYPE\_HARDWARE,
+
+&#x20;           nullptr,
+
+&#x20;           0,
+
+&#x20;           featureLevels,
+
+&#x20;           1,
+
+&#x20;           D3D11\_SDK\_VERSION,
+
+&#x20;           &swapDesc,
+
+&#x20;           &gpuSwapChain,
+
+&#x20;           &gpuDevice,
+
+&#x20;           &featureLevel,
+
+&#x20;           &gpuContext
+&#x20;       );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       MessageBoxA(
+&#x20;           hwnd,
+
+&#x20;           "Direct3D 11 hardware GPU initialization failed.",
+
+&#x20;           "GPU Error",
+
+&#x20;           MB\_ICONERROR
+&#x20;       );
+
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   if (
+&#x20;       !createRenderTarget() ||
+
+&#x20;       !createConstantBuffer(
+&#x20;           sizeof(
+&#x20;               GPUSimulationConstants
+&#x20;               ),
+
+&#x20;           &gpuSimulationConstantBuffer
+&#x20;       ) ||
+
+&#x20;       !createConstantBuffer(
+&#x20;           sizeof(
+&#x20;               GPUGridConstants
+&#x20;               ),
+
+&#x20;           &gpuGridConstantBuffer
+&#x20;       ) ||
+
+&#x20;       !createConstantBuffer(
+&#x20;           sizeof(
+&#x20;               GPURenderConstants
+&#x20;               ),
+
+&#x20;           &gpuRenderConstantBuffer
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   ID3DBlob\* blob =
+&#x20;       nullptr;
+
+&#x20;   // ========================================================
+&#x20;   // BUILD GRID SHADER
+&#x20;   // ========================================================
+
+&#x20;   if (
+&#x20;       !compileShader(
+&#x20;           buildGridShaderSource,
+
+&#x20;           "main",
+
+&#x20;           "cs\_5\_0",
+
+&#x20;           &blob
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   result =
+&#x20;       gpuDevice->
+&#x20;       CreateComputeShader(
+&#x20;           blob->
+&#x20;           GetBufferPointer(),
+
+&#x20;           blob->
+&#x20;           GetBufferSize(),
+
+&#x20;           nullptr,
+
+&#x20;           &gpuBuildGridShader
+&#x20;       );
+
+&#x20;   safeRelease(
+&#x20;       blob
+&#x20;   );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // SIMULATION SHADER
+&#x20;   // ========================================================
+
+&#x20;   if (
+&#x20;       !compileShader(
+&#x20;           simulationShaderSource,
+
+&#x20;           "main",
+
+&#x20;           "cs\_5\_0",
+
+&#x20;           &blob
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   result =
+&#x20;       gpuDevice->
+&#x20;       CreateComputeShader(
+&#x20;           blob->
+&#x20;           GetBufferPointer(),
+
+&#x20;           blob->
+&#x20;           GetBufferSize(),
+
+&#x20;           nullptr,
+
+&#x20;           &gpuSimulationShader
+&#x20;       );
+
+&#x20;   safeRelease(
+&#x20;       blob
+&#x20;   );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // CELL VERTEX SHADER
+&#x20;   // ========================================================
+
+&#x20;   if (
+&#x20;       !compileShader(
+&#x20;           cellVertexShaderSource,
+
+&#x20;           "main",
+
+&#x20;           "vs\_5\_0",
+
+&#x20;           &blob
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   result =
+&#x20;       gpuDevice->
+&#x20;       CreateVertexShader(
+&#x20;           blob->
+&#x20;           GetBufferPointer(),
+
+&#x20;           blob->
+&#x20;           GetBufferSize(),
+
+&#x20;           nullptr,
+
+&#x20;           &gpuCellVertexShader
+&#x20;       );
+
+&#x20;   safeRelease(
+&#x20;       blob
+&#x20;   );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // CELL GEOMETRY SHADER
+&#x20;   // ========================================================
+
+&#x20;   if (
+&#x20;       !compileShader(
+&#x20;           cellGeometryShaderSource,
+
+&#x20;           "main",
+
+&#x20;           "gs\_5\_0",
+
+&#x20;           &blob
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   result =
+&#x20;       gpuDevice->
+&#x20;       CreateGeometryShader(
+&#x20;           blob->
+&#x20;           GetBufferPointer(),
+
+&#x20;           blob->
+&#x20;           GetBufferSize(),
+
+&#x20;           nullptr,
+
+&#x20;           &gpuCellGeometryShader
+&#x20;       );
+
+&#x20;   safeRelease(
+&#x20;       blob
+&#x20;   );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // CELL PIXEL SHADER
+&#x20;   // ========================================================
+
+&#x20;   if (
+&#x20;       !compileShader(
+&#x20;           cellPixelShaderSource,
+
+&#x20;           "main",
+
+&#x20;           "ps\_5\_0",
+
+&#x20;           &blob
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   result =
+&#x20;       gpuDevice->
+&#x20;       CreatePixelShader(
+&#x20;           blob->
+&#x20;           GetBufferPointer(),
+
+&#x20;           blob->
+&#x20;           GetBufferSize(),
+
+&#x20;           nullptr,
+
+&#x20;           &gpuCellPixelShader
+&#x20;       );
+
+&#x20;   safeRelease(
+&#x20;       blob
+&#x20;   );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // WALL VERTEX SHADER
+&#x20;   // ========================================================
+
+&#x20;   if (
+&#x20;       !compileShader(
+&#x20;           wallVertexShaderSource,
+
+&#x20;           "main",
+
+&#x20;           "vs\_5\_0",
+
+&#x20;           &blob
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   result =
+&#x20;       gpuDevice->
+&#x20;       CreateVertexShader(
+&#x20;           blob->
+&#x20;           GetBufferPointer(),
+
+&#x20;           blob->
+&#x20;           GetBufferSize(),
+
+&#x20;           nullptr,
+
+&#x20;           &gpuWallVertexShader
+&#x20;       );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       safeRelease(
+&#x20;           blob
+&#x20;       );
+
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   D3D11\_INPUT\_ELEMENT\_DESC
+&#x20;       inputDesc =
+&#x20;   {
+&#x20;       "POSITION",
+
+&#x20;       0,
+
+&#x20;       DXGI\_FORMAT\_R32G32\_FLOAT,
+
+&#x20;       0,
+
+&#x20;       0,
+
+&#x20;       D3D11\_INPUT\_PER\_VERTEX\_DATA,
+
+&#x20;       0
+&#x20;   };
+
+&#x20;   result =
+&#x20;       gpuDevice->
+&#x20;       CreateInputLayout(
+&#x20;           &inputDesc,
+
+&#x20;           1,
+
+&#x20;           blob->
+&#x20;           GetBufferPointer(),
+
+&#x20;           blob->
+&#x20;           GetBufferSize(),
+
+&#x20;           &gpuWallInputLayout
+&#x20;       );
+
+&#x20;   safeRelease(
+&#x20;       blob
+&#x20;   );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // WALL PIXEL SHADER
+&#x20;   // ========================================================
+
+&#x20;   if (
+&#x20;       !compileShader(
+&#x20;           wallPixelShaderSource,
+
+&#x20;           "main",
+
+&#x20;           "ps\_5\_0",
+
+&#x20;           &blob
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   result =
+&#x20;       gpuDevice->
+&#x20;       CreatePixelShader(
+&#x20;           blob->
+&#x20;           GetBufferPointer(),
+
+&#x20;           blob->
+&#x20;           GetBufferSize(),
+
+&#x20;           nullptr,
+
+&#x20;           &gpuWallPixelShader
+&#x20;       );
+
+&#x20;   safeRelease(
+&#x20;       blob
+&#x20;   );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   if (
+&#x20;       !createGridBuffer() ||
+&#x20;       !createWallBuffer()
+&#x20;       )
+&#x20;   {
+&#x20;       return false;
+&#x20;   }
+
+&#x20;   gpuInitialized =
+&#x20;       true;
+
+&#x20;   updateGPUSettings();
+
+&#x20;   return true;
+}
+
+// ============================================================
+// RELEASE D3D
+// ============================================================
+
+void releaseD3D()
+{
+&#x20;   if (
+&#x20;       !gpuDevice
+&#x20;       )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   gpuContext->
+&#x20;       OMSetRenderTargets(
+&#x20;           0,
+&#x20;           nullptr,
+&#x20;           nullptr
+&#x20;       );
+
+&#x20;   gpuContext->
+&#x20;       Flush();
+
+&#x20;   safeRelease(
+&#x20;       gpuWallInputLayout
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuWallVertexBuffer
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellVertexShader
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellGeometryShader
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellPixelShader
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuWallVertexShader
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuWallPixelShader
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuBuildGridShader
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuSimulationShader
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuSimulationConstantBuffer
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuGridConstantBuffer
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuRenderConstantBuffer
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellSRV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellUAV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellBuffer
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellScratchSRV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellScratchUAV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellScratchBuffer
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuCellStaging
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuNextSRV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuNextUAV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuNextBuffer
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuGridHeadsSRV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuGridHeadsUAV
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuGridHeadsBuffer
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuRenderTarget
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuSwapChain
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuContext
+&#x20;   );
+
+&#x20;   safeRelease(
+&#x20;       gpuDevice
+&#x20;   );
+
+&#x20;   gpuCellCapacity =
+&#x20;       0;
+
+&#x20;   gpuCellCount =
+&#x20;       0;
+
+&#x20;   gpuInitialized =
+&#x20;       false;
+}
+
+// ============================================================
+// RENDER CONSTANTS
+// ============================================================
+
+void updateRenderConstants(
+&#x20;   int width,
+&#x20;   int height
+)
+{
+&#x20;   if (
+&#x20;       !gpuRenderConstantBuffer
+&#x20;       )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   GPURenderConstants
+&#x20;       constants = {};
+
+&#x20;   constants.cameraX =
+&#x20;       static\_cast\<float>(
+&#x20;           cameraX
+&#x20;           );
+
+&#x20;   constants.cameraY =
+&#x20;       static\_cast\<float>(
+&#x20;           cameraY
+&#x20;           );
+
+&#x20;   constants.zoom =
+&#x20;       static\_cast\<float>(
+&#x20;           zoom
+&#x20;           );
+
+&#x20;   constants.width =
+&#x20;       static\_cast\<float>(
+&#x20;           width
+&#x20;           );
+
+&#x20;   constants.height =
+&#x20;       static\_cast\<float>(
+&#x20;           height
+&#x20;           );
+
+&#x20;   float radius =
+&#x20;       5.0f \*
+&#x20;       static\_cast\<float>(
+&#x20;           zoom
+&#x20;           );
+
+&#x20;   constants.pixelRadius =
+&#x20;       std::max(
+&#x20;           radius,
+&#x20;           1.0f
+&#x20;       );
+
+&#x20;   gpuContext->
+&#x20;       UpdateSubresource(
+&#x20;           gpuRenderConstantBuffer,
+
+&#x20;           0,
+
+&#x20;           nullptr,
+
+&#x20;           &constants,
+
+&#x20;           0,
+&#x20;           0
+&#x20;       );
+}
+
+// ============================================================
+// WALL BUFFER UPDATE
+// ============================================================
+
+void updateWallBuffer()
+{
+&#x20;   if (
+&#x20;       wallSize <=
+&#x20;       0.0 ||
+&#x20;       !gpuWallVertexBuffer
+&#x20;       )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   float half =
+&#x20;       static\_cast\<float>(
+&#x20;           wallSize \*
+&#x20;           0.5
+&#x20;           );
+
+&#x20;   WallVertex vertices[8] =
+&#x20;   {
+&#x20;       { -half, -half },
+&#x20;       {  half, -half },
+
+&#x20;       {  half, -half },
+&#x20;       {  half,  half },
+
+&#x20;       {  half,  half },
+&#x20;       { -half,  half },
+
+&#x20;       { -half,  half },
+&#x20;       { -half, -half }
+&#x20;   };
+
+&#x20;   D3D11\_MAPPED\_SUBRESOURCE
+&#x20;       mapped = {};
+
+&#x20;   HRESULT result =
+&#x20;       gpuContext->
+&#x20;       Map(
+&#x20;           gpuWallVertexBuffer,
+
+&#x20;           0,
+
+&#x20;           D3D11\_MAP\_WRITE\_DISCARD,
+
+&#x20;           0,
+
+&#x20;           &mapped
+&#x20;       );
+
+&#x20;   if (
+&#x20;       FAILED(
+&#x20;           result
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   memcpy(
+&#x20;       mapped.pData,
+
+&#x20;       vertices,
+
+&#x20;       sizeof(
+&#x20;           vertices
+&#x20;           )
+&#x20;   );
+
+&#x20;   gpuContext->
+&#x20;       Unmap(
+&#x20;           gpuWallVertexBuffer,
+&#x20;           0
+&#x20;       );
+}
+
+// ============================================================
+// RENDER
+// ============================================================
+
+void renderFrame()
+{
+&#x20;   if (
+&#x20;       !gpuInitialized ||
+&#x20;       !gpuRenderTarget
+&#x20;       )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   RECT rect;
+
+&#x20;   GetClientRect(
+&#x20;       mainWindow,
+&#x20;       &rect
+&#x20;   );
+
+&#x20;   int width =
+&#x20;       rect.right -
+&#x20;       rect.left;
+
+&#x20;   int height =
+&#x20;       rect.bottom -
+&#x20;       rect.top;
+
+&#x20;   if (
+&#x20;       width <=
+&#x20;       0 ||
+&#x20;       height <=
+&#x20;       0
+&#x20;       )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   const float clearColor[4] =
+&#x20;   {
+&#x20;       0.0f,
+&#x20;       0.0f,
+&#x20;       0.0f,
+&#x20;       1.0f
+&#x20;   };
+
+&#x20;   gpuContext->
+&#x20;       OMSetRenderTargets(
+&#x20;           1,
+
+&#x20;           &gpuRenderTarget,
+
+&#x20;           nullptr
+&#x20;       );
+
+&#x20;   gpuContext->
+&#x20;       ClearRenderTargetView(
+&#x20;           gpuRenderTarget,
+
+&#x20;           clearColor
+&#x20;       );
+
+&#x20;   D3D11\_VIEWPORT
+&#x20;       viewport = {};
+
+&#x20;   viewport.Width =
+&#x20;       static\_cast\<float>(
+&#x20;           width
+&#x20;           );
+
+&#x20;   viewport.Height =
+&#x20;       static\_cast\<float>(
+&#x20;           height
+&#x20;           );
+
+&#x20;   viewport.MinDepth =
+&#x20;       0.0f;
+
+&#x20;   viewport.MaxDepth =
+&#x20;       1.0f;
+
+&#x20;   gpuContext->
+&#x20;       RSSetViewports(
+&#x20;           1,
+&#x20;           &viewport
+&#x20;       );
+
+&#x20;   updateRenderConstants(
+&#x20;       width,
+&#x20;       height
+&#x20;   );
+
+&#x20;   // ========================================================
+&#x20;   // CELLS
+&#x20;   // ========================================================
+
+&#x20;   if (
+&#x20;       gpuCellCount >
+&#x20;       0 &&
+&#x20;       gpuCellSRV
+&#x20;       )
+&#x20;   {
+&#x20;       gpuContext->
+&#x20;           IASetInputLayout(
+&#x20;               nullptr
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           IASetPrimitiveTopology(
+&#x20;               D3D11\_PRIMITIVE\_TOPOLOGY\_POINTLIST
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           VSSetShader(
+&#x20;               gpuCellVertexShader,
+&#x20;               nullptr,
+&#x20;               0
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           GSSetShader(
+&#x20;               gpuCellGeometryShader,
+&#x20;               nullptr,
+&#x20;               0
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           PSSetShader(
+&#x20;               gpuCellPixelShader,
+&#x20;               nullptr,
+&#x20;               0
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           VSSetShaderResources(
+&#x20;               0,
+&#x20;               1,
+&#x20;               &gpuCellSRV
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           VSSetConstantBuffers(
+&#x20;               0,
+&#x20;               1,
+&#x20;               &gpuRenderConstantBuffer
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           GSSetConstantBuffers(
+&#x20;               0,
+&#x20;               1,
+&#x20;               &gpuRenderConstantBuffer
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           Draw(
+&#x20;               static\_cast\<UINT>(
+&#x20;                   gpuCellCount
+&#x20;                   ),
+
+&#x20;               0
+&#x20;           );
+
+&#x20;       ID3D11ShaderResourceView\*
+&#x20;           nullSRV =
+&#x20;           nullptr;
+
+&#x20;       gpuContext->
+&#x20;           VSSetShaderResources(
+&#x20;               0,
+&#x20;               1,
+&#x20;               &nullSRV
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           VSSetShader(
+&#x20;               nullptr,
+&#x20;               nullptr,
+&#x20;               0
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           GSSetShader(
+&#x20;               nullptr,
+&#x20;               nullptr,
+&#x20;               0
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           PSSetShader(
+&#x20;               nullptr,
+&#x20;               nullptr,
+&#x20;               0
+&#x20;           );
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // WALL
+&#x20;   // ========================================================
+
+&#x20;   if (
+&#x20;       wallSize >
+&#x20;       0.0 &&
+&#x20;       gpuWallVertexBuffer
+&#x20;       )
+&#x20;   {
+&#x20;       updateWallBuffer();
+
+&#x20;       UINT stride =
+&#x20;           sizeof(
+&#x20;               WallVertex
+&#x20;               );
+
+&#x20;       UINT offset =
+&#x20;           0;
+
+&#x20;       gpuContext->
+&#x20;           IASetInputLayout(
+&#x20;               gpuWallInputLayout
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           IASetVertexBuffers(
+&#x20;               0,
+
+&#x20;               1,
+
+&#x20;               &gpuWallVertexBuffer,
+
+&#x20;               &stride,
+
+&#x20;               &offset
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           IASetPrimitiveTopology(
+&#x20;               D3D11\_PRIMITIVE\_TOPOLOGY\_LINELIST
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           VSSetShader(
+&#x20;               gpuWallVertexShader,
+&#x20;               nullptr,
+&#x20;               0
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           PSSetShader(
+&#x20;               gpuWallPixelShader,
+&#x20;               nullptr,
+&#x20;               0
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           VSSetConstantBuffers(
+&#x20;               0,
+&#x20;               1,
+&#x20;               &gpuRenderConstantBuffer
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           Draw(
+&#x20;               8,
+&#x20;               0
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           VSSetShader(
+&#x20;               nullptr,
+&#x20;               nullptr,
+&#x20;               0
+&#x20;           );
+
+&#x20;       gpuContext->
+&#x20;           PSSetShader(
+&#x20;               nullptr,
+&#x20;               nullptr,
+&#x20;               0
+&#x20;           );
+&#x20;   }
+
+&#x20;   gpuSwapChain->
+&#x20;       Present(
+&#x20;           1,
+&#x20;           0
+&#x20;       );
+}
+
+// ============================================================
+// SPEED
+// ============================================================
+
+void updateSpeedButton()
+{
+&#x20;   char text[64];
+
+&#x20;   sprintf\_s(
+&#x20;       text,
+
+&#x20;       sizeof(
+&#x20;           text
+&#x20;           ),
+
+&#x20;       "Speed: %d/s",
+
+&#x20;       processSpeed
+&#x20;   );
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_SPEED,
+&#x20;       text
+&#x20;   );
+}
+
+void changeProcessSpeed()
+{
+&#x20;   currentProcessSpeedIndex =
+&#x20;       (
+&#x20;           currentProcessSpeedIndex +
+&#x20;           1
+&#x20;           ) %
+&#x20;       4;
+
+&#x20;   processSpeed =
+&#x20;       processSpeeds[
+&#x20;           currentProcessSpeedIndex
+&#x20;       ];
+
+&#x20;   updateSpeedButton();
+
+&#x20;   updateGPUSettings();
+}
+
+// ============================================================
+// TRUE SPEED
+// ============================================================
+
+void updateTrueSpeedButton()
+{
+&#x20;   setButtonText(
+&#x20;       BUTTON\_TRUE\_SPEED,
+
+&#x20;       trueSpeedEnabled
+&#x20;       ? "True speed: ON"
+&#x20;       : "True speed: OFF"
+&#x20;   );
+}
+
+void toggleTrueSpeed()
+{
+&#x20;   trueSpeedEnabled =
+&#x20;       !trueSpeedEnabled;
+
+&#x20;   stepAccumulator =
+&#x20;       0.0;
+
+&#x20;   updateTrueSpeedButton();
+
+&#x20;   updateGPUSettings();
+}
+
+// ============================================================
+// CELL COLOR
+// ============================================================
+
+void changeCellColor()
+{
+&#x20;   currentColorIndex =
+&#x20;       (
+&#x20;           currentColorIndex +
+&#x20;           1
+&#x20;           ) %
+&#x20;       COLOR\_COUNT;
+
+&#x20;   currentCellColor =
+&#x20;       cellColors[
+&#x20;           currentColorIndex
+&#x20;       ];
+
+&#x20;   char text[64];
+
+&#x20;   sprintf\_s(
+&#x20;       text,
+
+&#x20;       sizeof(
+&#x20;           text
+&#x20;           ),
+
+&#x20;       "Color: %s",
+
+&#x20;       colorNames[
+&#x20;           currentColorIndex
+&#x20;       ]
+&#x20;   );
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_COLOR,
+&#x20;       text
+&#x20;   );
+}
+
+// ============================================================
+// COLOR BUTTONS
+// ============================================================
+
+void updateFromColorButton()
+{
+&#x20;   char text[64];
+
+&#x20;   sprintf\_s(
+&#x20;       text,
+
+&#x20;       sizeof(
+&#x20;           text
+&#x20;           ),
+
+&#x20;       "From: %s",
+
+&#x20;       colorNames[
+&#x20;           currentFromColorIndex
+&#x20;       ]
+&#x20;   );
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_FROMCOLOR,
+&#x20;       text
+&#x20;   );
+}
+
+void updateToColorButton()
+{
+&#x20;   char text[64];
+
+&#x20;   sprintf\_s(
+&#x20;       text,
+
+&#x20;       sizeof(
+&#x20;           text
+&#x20;           ),
+
+&#x20;       "To: %s",
+
+&#x20;       colorNames[
+&#x20;           currentToColorIndex
+&#x20;       ]
+&#x20;   );
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_TOCOLOR,
+&#x20;       text
+&#x20;   );
+}
+
+// ============================================================
+// LOAD COLOR PAIR
+// ============================================================
+
+void loadColorPairSettings()
+{
+&#x20;   currentAttraction =
+&#x20;       attractionSettings[
+&#x20;           currentFromColorIndex
+&#x20;       ][
+&#x20;           currentToColorIndex
+&#x20;       ];
+
+&#x20;   currentAttractionRange =
+&#x20;       attractionRangeSettings[
+&#x20;           currentFromColorIndex
+&#x20;       ][
+&#x20;           currentToColorIndex
+&#x20;       ];
+
+&#x20;   char text[64];
+
+&#x20;   sprintf\_s(
+&#x20;       text,
+
+&#x20;       sizeof(
+&#x20;           text
+&#x20;           ),
+
+&#x20;       "Attraction: %.0f%%",
+
+&#x20;       currentAttraction
+&#x20;   );
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_ATTRACTION,
+&#x20;       text
+&#x20;   );
+
+&#x20;   sprintf\_s(
+&#x20;       text,
+
+&#x20;       sizeof(
+&#x20;           text
+&#x20;           ),
+
+&#x20;       "Range: %.0f",
+
+&#x20;       currentAttractionRange
+&#x20;   );
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_ATTRACTIONRANGE,
+&#x20;       text
+&#x20;   );
+
+&#x20;   HWND attractionSlider =
+&#x20;       GetDlgItem(
+&#x20;           mainWindow,
+&#x20;           SLIDER\_ATTRACTION
+&#x20;       );
+
+&#x20;   if (
+&#x20;       attractionSlider
+&#x20;       )
+&#x20;   {
+&#x20;       SendMessage(
+&#x20;           attractionSlider,
+
+&#x20;           TBM\_SETPOS,
+
+&#x20;           TRUE,
+
+&#x20;           static\_cast\<LPARAM>(
+&#x20;               std::round(
+&#x20;                   currentAttraction
+&#x20;               )
+&#x20;               )
+&#x20;       );
+&#x20;   }
+
+&#x20;   HWND rangeSlider =
+&#x20;       GetDlgItem(
+&#x20;           mainWindow,
+&#x20;           SLIDER\_ATTRACTIONRANGE
+&#x20;       );
+
+&#x20;   if (
+&#x20;       rangeSlider
+&#x20;       )
+&#x20;   {
+&#x20;       SendMessage(
+&#x20;           rangeSlider,
+
+&#x20;           TBM\_SETPOS,
+
+&#x20;           TRUE,
+
+&#x20;           static\_cast\<LPARAM>(
+&#x20;               std::round(
+&#x20;                   currentAttractionRange
+&#x20;               )
+&#x20;               )
+&#x20;       );
+&#x20;   }
+}
+
+// ============================================================
+// SAVE COLOR PAIR
+// ============================================================
+
+void saveColorPairSettings()
+{
+&#x20;   attractionSettings[
+&#x20;       currentFromColorIndex
+&#x20;   ][
+&#x20;       currentToColorIndex
+&#x20;   ] =
+&#x20;           currentAttraction;
+
+&#x20;       attractionRangeSettings[
+&#x20;           currentFromColorIndex
+&#x20;       ][
+&#x20;           currentToColorIndex
+&#x20;       ] =
+&#x20;               currentAttractionRange;
+
+&#x20;           updateGPUSettings();
+}
+
+// ============================================================
+// CHANGE COLORS
+// ============================================================
+
+void changeFromColor()
+{
+&#x20;   currentFromColorIndex =
+&#x20;       (
+&#x20;           currentFromColorIndex +
+&#x20;           1
+&#x20;           ) %
+&#x20;       COLOR\_COUNT;
+
+&#x20;   updateFromColorButton();
+
+&#x20;   loadColorPairSettings();
+}
+
+void changeToColor()
+{
+&#x20;   currentToColorIndex =
+&#x20;       (
+&#x20;           currentToColorIndex +
+&#x20;           1
+&#x20;           ) %
+&#x20;       COLOR\_COUNT;
+
+&#x20;   updateToColorButton();
+
+&#x20;   loadColorPairSettings();
+}
+
+// ============================================================
+// ATTRACTION
+// ============================================================
+
+void changeAttraction()
+{
+&#x20;   currentAttraction +=
+&#x20;       10.0;
+
+&#x20;   if (
+&#x20;       currentAttraction >
+&#x20;       100.0
+&#x20;       )
+&#x20;   {
+&#x20;       currentAttraction =
+&#x20;           -100.0;
+&#x20;   }
+
+&#x20;   saveColorPairSettings();
+
+&#x20;   loadColorPairSettings();
+}
+
+// ============================================================
+// RANGE
+// ============================================================
+
+void changeAttractionRange()
+{
+&#x20;   static const double ranges[] =
+&#x20;   {
+&#x20;       0.0,
+&#x20;       25.0,
+&#x20;       50.0,
+&#x20;       75.0,
+&#x20;       100.0,
+&#x20;       150.0,
+&#x20;       200.0,
+&#x20;       250.0,
+&#x20;       300.0
+&#x20;   };
+
+&#x20;   constexpr int RANGE\_COUNT =
+&#x20;       sizeof(
+&#x20;           ranges
+&#x20;           ) /
+&#x20;       sizeof(
+&#x20;           ranges[0]
+&#x20;           );
+
+&#x20;   int currentIndex =
+&#x20;       0;
+
+&#x20;   for (
+&#x20;       int i = 0;
+&#x20;       i < RANGE\_COUNT;
+&#x20;       ++i
+&#x20;       )
+&#x20;   {
+&#x20;       if (
+&#x20;           currentAttractionRange ==
+&#x20;           ranges[
+&#x20;               i
+&#x20;           ]
+&#x20;           )
+&#x20;       {
+&#x20;           currentIndex =
+&#x20;               i;
+
+&#x20;           break;
+&#x20;       }
+&#x20;   }
+
+&#x20;   currentAttractionRange =
+&#x20;       ranges[
+&#x20;           (
+&#x20;               currentIndex +
+&#x20;               1
+&#x20;               ) %
+&#x20;               RANGE\_COUNT
+&#x20;       ];
+
+&#x20;   saveColorPairSettings();
+
+&#x20;   loadColorPairSettings();
+}
+
+// ============================================================
+// REALISTIC FORCE
+// ============================================================
+
+void toggleRealisticForce()
+{
+&#x20;   realisticForceEnabled =
+&#x20;       !realisticForceEnabled;
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_REALISTIC\_FORCE,
+
+&#x20;       realisticForceEnabled
+&#x20;       ? "Realistic Force: ON"
+&#x20;       : "Realistic Force: OFF"
+&#x20;   );
+
+&#x20;   updateGPUSettings();
+
+&#x20;   InvalidateRect(
+&#x20;       mainWindow,
+&#x20;       nullptr,
+&#x20;       FALSE
+&#x20;   );
+}
+
+// ============================================================
+// SPAWN ALL AMOUNT
+// ============================================================
+
+void updateSpawnAllButton()
+{
+&#x20;   char text[64];
+
+&#x20;   sprintf\_s(
+&#x20;       text,
+
+&#x20;       sizeof(
+&#x20;           text
+&#x20;           ),
+
+&#x20;       "All: %d each",
+
+&#x20;       spawnAllAmount
+&#x20;   );
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_SPAWN\_ALL\_AMOUNT,
+&#x20;       text
+&#x20;   );
+}
+
+void changeSpawnAllAmount()
+{
+&#x20;   currentSpawnAllIndex =
+&#x20;       (
+&#x20;           currentSpawnAllIndex +
+&#x20;           1
+&#x20;           ) %
+&#x20;       4;
+
+&#x20;   spawnAllAmount =
+&#x20;       spawnAmounts[
+&#x20;           currentSpawnAllIndex
+&#x20;       ];
+
+&#x20;   updateSpawnAllButton();
+}
+
+// ============================================================
+// SPAWN AMOUNT
+// ============================================================
+
+void changeSpawnAmount()
+{
+&#x20;   currentSpawnIndex =
+&#x20;       (
+&#x20;           currentSpawnIndex +
+&#x20;           1
+&#x20;           ) %
+&#x20;       4;
+
+&#x20;   spawnAmount =
+&#x20;       spawnAmounts[
+&#x20;           currentSpawnIndex
+&#x20;       ];
+
+&#x20;   char text[64];
+
+&#x20;   sprintf\_s(
+&#x20;       text,
+
+&#x20;       sizeof(
+&#x20;           text
+&#x20;           ),
+
+&#x20;       "Spawn: %d",
+
+&#x20;       spawnAmount
+&#x20;   );
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_SPAWN,
+&#x20;       text
+&#x20;   );
+}
+
+// ============================================================
+// WALL
+// ============================================================
+
+void changeWall()
+{
+&#x20;   currentWallIndex =
+&#x20;       (
+&#x20;           currentWallIndex +
+&#x20;           1
+&#x20;           ) %
+&#x20;       5;
+
+&#x20;   wallSize =
+&#x20;       wallSizes[
+&#x20;           currentWallIndex
+&#x20;       ];
+
+&#x20;   char text[64];
+
+&#x20;   if (
+&#x20;       wallSize ==
+&#x20;       0.0
+&#x20;       )
+&#x20;   {
+&#x20;       strcpy\_s(
+&#x20;           text,
+
+&#x20;           sizeof(
+&#x20;               text
+&#x20;               ),
+
+&#x20;           "Wall: None"
+&#x20;       );
+&#x20;   }
+&#x20;   else
+&#x20;   {
+&#x20;       sprintf\_s(
+&#x20;           text,
+
+&#x20;           sizeof(
+&#x20;               text
+&#x20;               ),
+
+&#x20;           "Wall: %.0fx%.0f",
+
+&#x20;           wallSize,
+&#x20;           wallSize
+&#x20;       );
+&#x20;   }
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_WALL,
+&#x20;       text
+&#x20;   );
+
+&#x20;   updateGPUSettings();
+}
+
+// ============================================================
+// FINISH CELL COLOR
+// ============================================================
+
+void setCellColorData(
+&#x20;   Cell& cell,
+
+&#x20;   COLORREF color
+)
+{
+&#x20;   cell.color =
+&#x20;       color;
+
+&#x20;   cell.colorIndex =
+&#x20;       0;
+
+&#x20;   for (
+&#x20;       int i = 0;
+&#x20;       i < COLOR\_COUNT;
+&#x20;       ++i
+&#x20;       )
+&#x20;   {
+&#x20;       if (
+&#x20;           cellColors[
+&#x20;               i
+&#x20;           ] ==
+&#x20;           color
+&#x20;                   )
+&#x20;       {
+&#x20;           cell.colorIndex =
+&#x20;               i;
+
+&#x20;           break;
+&#x20;       }
+&#x20;   }
+}
+
+// ============================================================
+// ADD CELL WITH COLOR
+// ============================================================
+
+void addCellWithColor(
+&#x20;   COLORREF color
+)
+{
+&#x20;   double spawnMin;
+&#x20;   double spawnMax;
+
+&#x20;   if (
+&#x20;       wallSize >
+&#x20;       0.0
+&#x20;       )
+&#x20;   {
+&#x20;       constexpr double particleRadius =
+&#x20;           5.0;
+
+&#x20;       double halfWall =
+&#x20;           wallSize \*
+&#x20;           0.5;
+
+&#x20;       spawnMin =
+&#x20;           -halfWall +
+&#x20;           particleRadius;
+
+&#x20;       spawnMax =
+&#x20;           halfWall -
+&#x20;           particleRadius;
+&#x20;   }
+&#x20;   else
+&#x20;   {
+&#x20;       spawnMin =
+&#x20;           -2000.0;
+
+&#x20;       spawnMax =
+&#x20;           2000.0;
+&#x20;   }
+
+&#x20;   std::uniform\_real\_distribution\<double>
+&#x20;       randomPosition(
+&#x20;           spawnMin,
+&#x20;           spawnMax
+&#x20;       );
+
+&#x20;   Cell newCell;
+
+&#x20;   constexpr int MAX\_SPAWN\_ATTEMPTS =
+&#x20;       128;
+
+&#x20;   for (
+&#x20;       int attempt = 0;
+&#x20;       attempt < MAX\_SPAWN\_ATTEMPTS;
+&#x20;       ++attempt
+&#x20;       )
+&#x20;   {
+&#x20;       double candidateX =
+&#x20;           randomPosition(
+&#x20;               randomGenerator
+&#x20;           );
+
+&#x20;       double candidateY =
+&#x20;           randomPosition(
+&#x20;               randomGenerator
+&#x20;           );
+
+&#x20;       double distanceSquared =
+&#x20;           candidateX \*
+&#x20;           candidateX +
+&#x20;           candidateY \*
+&#x20;           candidateY;
+
+&#x20;       if (
+&#x20;           distanceSquared >=
+&#x20;           SPAWN\_CENTER\_EXCLUSION\_RADIUS \*
+&#x20;           SPAWN\_CENTER\_EXCLUSION\_RADIUS
+&#x20;           )
+&#x20;       {
+&#x20;           newCell.x =
+&#x20;               candidateX;
+
+&#x20;           newCell.y =
+&#x20;               candidateY;
+
+&#x20;           break;
+&#x20;       }
+
+&#x20;       if (
+&#x20;           attempt ==
+&#x20;           MAX\_SPAWN\_ATTEMPTS -
+&#x20;           1
+&#x20;           )
+&#x20;       {
+&#x20;           newCell.x =
+&#x20;               spawnMin;
+
+&#x20;           newCell.y =
+&#x20;               spawnMin;
+&#x20;       }
+&#x20;   }
+
+&#x20;   newCell.vx =
+&#x20;       0.0;
+
+&#x20;   newCell.vy =
+&#x20;       0.0;
+
+&#x20;   setCellColorData(
+&#x20;       newCell,
+&#x20;       color
+&#x20;   );
+
+&#x20;   cells.push\_back(
+&#x20;       newCell
+&#x20;   );
+}
+
+// ============================================================
+// PLAY RECTANGLE SPAWN
+// ============================================================
+
+void addPlayCellWithColor(
+&#x20;   COLORREF color
+)
+{
+&#x20;   std::uniform\_real\_distribution\<double>
+&#x20;       randomPositionX(
+&#x20;           PLAY\_SPAWN\_MIN\_X,
+&#x20;           PLAY\_SPAWN\_MAX\_X
+&#x20;       );
+
+&#x20;   std::uniform\_real\_distribution\<double>
+&#x20;       randomPositionY(
+&#x20;           PLAY\_SPAWN\_MIN\_Y,
+&#x20;           PLAY\_SPAWN\_MAX\_Y
+&#x20;       );
+
+&#x20;   Cell newCell;
+
+&#x20;   constexpr int MAX\_SPAWN\_ATTEMPTS =
+&#x20;       128;
+
+&#x20;   for (
+&#x20;       int attempt = 0;
+&#x20;       attempt < MAX\_SPAWN\_ATTEMPTS;
+&#x20;       ++attempt
+&#x20;       )
+&#x20;   {
+&#x20;       double candidateX =
+&#x20;           randomPositionX(
+&#x20;               randomGenerator
+&#x20;           );
+
+&#x20;       double candidateY =
+&#x20;           randomPositionY(
+&#x20;               randomGenerator
+&#x20;           );
+
+&#x20;       double distanceSquared =
+&#x20;           candidateX \*
+&#x20;           candidateX +
+&#x20;           candidateY \*
+&#x20;           candidateY;
+
+&#x20;       if (
+&#x20;           distanceSquared >=
+&#x20;           SPAWN\_CENTER\_EXCLUSION\_RADIUS \*
+&#x20;           SPAWN\_CENTER\_EXCLUSION\_RADIUS
+&#x20;           )
+&#x20;       {
+&#x20;           newCell.x =
+&#x20;               candidateX;
+
+&#x20;           newCell.y =
+&#x20;               candidateY;
+
+&#x20;           break;
+&#x20;       }
+
+&#x20;       if (
+&#x20;           attempt ==
+&#x20;           MAX\_SPAWN\_ATTEMPTS -
+&#x20;           1
+&#x20;           )
+&#x20;       {
+&#x20;           newCell.x =
+&#x20;               PLAY\_SPAWN\_MIN\_X;
+
+&#x20;           newCell.y =
+&#x20;               PLAY\_SPAWN\_MIN\_Y;
+&#x20;       }
+&#x20;   }
+
+&#x20;   newCell.vx =
+&#x20;       0.0;
+
+&#x20;   newCell.vy =
+&#x20;       0.0;
+
+&#x20;   setCellColorData(
+&#x20;       newCell,
+&#x20;       color
+&#x20;   );
+
+&#x20;   cells.push\_back(
+&#x20;       newCell
+&#x20;   );
+}
+
+// ============================================================
+// ADD CELLS
+// ============================================================
+
+void addCell()
+{
+&#x20;   if (
+&#x20;       gpuCellCount >
+&#x20;       0 &&
+&#x20;       !syncCPUFromGPU()
+&#x20;       )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   cells.reserve(
+&#x20;       cells.size() +
+&#x20;       static\_cast\<size\_t>(
+&#x20;           spawnAmount
+&#x20;           )
+&#x20;   );
+
+&#x20;   for (
+&#x20;       int i = 0;
+&#x20;       i < spawnAmount;
+&#x20;       ++i
+&#x20;       )
+&#x20;   {
+&#x20;       addCellWithColor(
+&#x20;           currentCellColor
+&#x20;       );
+&#x20;   }
+
+&#x20;   uploadCellsToGPU();
+
+&#x20;   InvalidateRect(
+&#x20;       mainWindow,
+&#x20;       nullptr,
+&#x20;       FALSE
+&#x20;   );
+}
+
+// ============================================================
+// SPAWN ALL
+// ============================================================
+
+void spawnAllColors()
+{
+&#x20;   if (
+&#x20;       gpuCellCount >
+&#x20;       0 &&
+&#x20;       !syncCPUFromGPU()
+&#x20;       )
+&#x20;   {
+&#x20;       return;
+&#x20;   }
+
+&#x20;   cells.reserve(
+&#x20;       cells.size() +
+&#x20;       static\_cast\<size\_t>(
+&#x20;           spawnAllAmount \*
+&#x20;           COLOR\_COUNT
+&#x20;           )
+&#x20;   );
+
+&#x20;   for (
+&#x20;       int color = 0;
+&#x20;       color < COLOR\_COUNT;
+&#x20;       ++color
+&#x20;       )
+&#x20;   {
+&#x20;       for (
+&#x20;           int i = 0;
+&#x20;           i < spawnAllAmount;
+&#x20;           ++i
+&#x20;           )
+&#x20;       {
+&#x20;           addCellWithColor(
+&#x20;               cellColors[
+&#x20;                   color
+&#x20;               ]
+&#x20;           );
+&#x20;       }
+&#x20;   }
+
+&#x20;   uploadCellsToGPU();
+
+&#x20;   InvalidateRect(
+&#x20;       mainWindow,
+&#x20;       nullptr,
+&#x20;       FALSE
+&#x20;   );
+}
+
+// ============================================================
+// CLEAR CELLS
+// ============================================================
+
+void clearCells()
+{
+&#x20;   cells.clear();
+
+&#x20;   gpuCellCount =
+&#x20;       0;
+
+&#x20;   updateGPUSettings();
+
+&#x20;   InvalidateRect(
+&#x20;       mainWindow,
+&#x20;       nullptr,
+&#x20;       FALSE
+&#x20;   );
+}
+
+// ============================================================
+// SEED HASH
+// ============================================================
+
+unsigned int hashSeedText(
+&#x20;   const char\* text
+)
+{
+&#x20;   unsigned int hash =
+&#x20;       2166136261u;
+
+&#x20;   for (
+&#x20;       int i = 0;
+&#x20;       text[
+&#x20;           i
+&#x20;       ] != '\0';
+&#x20;       ++i
+&#x20;               )
+&#x20;   {
+&#x20;       unsigned char c =
+&#x20;           static\_cast\<unsigned char>(
+&#x20;               text[
+&#x20;                   i
+&#x20;               ]
+&#x20;               );
+
+&#x20;       if (
+&#x20;           c >=
+&#x20;           'A' &&
+&#x20;           c <=
+&#x20;           'Z'
+&#x20;           )
+&#x20;       {
+&#x20;           c =
+&#x20;               static\_cast\<unsigned char>(
+&#x20;                   c +
+&#x20;                   (
+&#x20;                       'a' -
+&#x20;                       'A'
+&#x20;                       )
+&#x20;                   );
+&#x20;       }
+
+&#x20;       hash ^=
+&#x20;           static\_cast\<unsigned int>(
+&#x20;               c
+&#x20;               );
+
+&#x20;       hash \*=
+&#x20;           16777619u;
+&#x20;   }
+
+&#x20;   if (
+&#x20;       hash ==
+&#x20;       0u
+&#x20;       )
+&#x20;   {
+&#x20;       hash =
+&#x20;           0xA341316Cu;
+&#x20;   }
+
+&#x20;   return hash;
+}
+
+// ============================================================
+// APPLY SEED
+// ============================================================
+
+void applySeedSettings()
+{
+&#x20;   char seedText[
+&#x20;       RANDOM\_SEED\_LENGTH +
+&#x20;           1
+&#x20;   ] = {};
+
+&#x20;       if (
+&#x20;           seedEdit
+&#x20;           )
+&#x20;       {
+&#x20;           GetWindowTextA(
+&#x20;               seedEdit,
+
+&#x20;               seedText,
+
+&#x20;               static\_cast\<int>(
+&#x20;                   sizeof(
+&#x20;                       seedText
+&#x20;                       )
+&#x20;                   )
+&#x20;           );
+&#x20;       }
+
+&#x20;       char cleanSeed[
+&#x20;           RANDOM\_SEED\_LENGTH +
+&#x20;               1
+&#x20;       ] = {};
+
+&#x20;           int cleanLength =
+&#x20;               0;
+
+&#x20;           for (
+&#x20;               int i = 0;
+
+&#x20;               seedText[
+&#x20;                   i
+&#x20;               ] != '\0' &&
+&#x20;               cleanLength <
+&#x20;                       RANDOM\_SEED\_LENGTH;
+
+&#x20;                       ++i
+&#x20;                       )
+&#x20;           {
+&#x20;               unsigned char c =
+&#x20;                   static\_cast\<unsigned char>(
+&#x20;                       seedText[
+&#x20;                           i
+&#x20;                       ]
+&#x20;                       );
+
+&#x20;               bool isNumber =
+&#x20;                   c >=
+&#x20;                   '0' &&
+&#x20;                   c <=
+&#x20;                   '9';
+
+&#x20;               bool isLower =
+&#x20;                   c >=
+&#x20;                   'a' &&
+&#x20;                   c <=
+&#x20;                   'z';
+
+&#x20;               bool isUpper =
+&#x20;                   c >=
+&#x20;                   'A' &&
+&#x20;                   c <=
+&#x20;                   'Z';
+
+&#x20;               if (
+&#x20;                   isNumber ||
+&#x20;                   isLower ||
+&#x20;                   isUpper
+&#x20;                   )
+&#x20;               {
+&#x20;                   cleanSeed[
+&#x20;                       cleanLength++
+&#x20;                   ] =
+&#x20;                       static\_cast\<char>(
+&#x20;                           c
+&#x20;                           );
+&#x20;               }
+&#x20;           }
+
+&#x20;           cleanSeed[
+&#x20;               cleanLength
+&#x20;           ] =
+&#x20;               '\0';
+
+&#x20;               if (
+&#x20;                   seedEdit
+&#x20;                   )
+&#x20;               {
+&#x20;                   SetWindowTextA(
+&#x20;                       seedEdit,
+&#x20;                       cleanSeed
+&#x20;                   );
+&#x20;               }
+
+&#x20;               std::mt19937 seedGenerator(
+&#x20;                   hashSeedText(
+&#x20;                       cleanSeed
+&#x20;                   )
+&#x20;               );
+
+&#x20;               std::uniform\_int\_distribution\<int>
+&#x20;                   randomAttraction(
+&#x20;                       -100,
+&#x20;                       100
+&#x20;                   );
+
+&#x20;               std::uniform\_int\_distribution\<int>
+&#x20;                   randomRange(
+&#x20;                       0,
+&#x20;                       300
+&#x20;                   );
+
+&#x20;               for (
+&#x20;                   int from = 0;
+&#x20;                   from < COLOR\_COUNT;
+&#x20;                   ++from
+&#x20;                   )
+&#x20;               {
+&#x20;                   for (
+&#x20;                       int to = 0;
+&#x20;                       to < COLOR\_COUNT;
+&#x20;                       ++to
+&#x20;                       )
+&#x20;                   {
+&#x20;                       attractionSettings[
+&#x20;                           from
+&#x20;                       ][
+&#x20;                           to
+&#x20;                       ] =
+&#x20;                               static\_cast\<double>(
+&#x20;                                   randomAttraction(
+&#x20;                                       seedGenerator
+&#x20;                                   )
+&#x20;                                   );
+
+&#x20;                           attractionRangeSettings[
+&#x20;                               from
+&#x20;                           ][
+&#x20;                               to
+&#x20;                           ] =
+&#x20;                                   static\_cast\<double>(
+&#x20;                                       randomRange(
+&#x20;                                           seedGenerator
+&#x20;                                       )
+&#x20;                                       );
+&#x20;                   }
+&#x20;               }
+
+&#x20;               updateGPUSettings();
+
+&#x20;               loadColorPairSettings();
+
+&#x20;               InvalidateRect(
+&#x20;                   mainWindow,
+&#x20;                   nullptr,
+&#x20;                   FALSE
+&#x20;               );
+}
+
+// ============================================================
+// RANDOMIZE
+// ============================================================
+
+void randomizeAllPairs()
+{
+&#x20;   char generatedSeed[
+&#x20;       RANDOM\_SEED\_LENGTH +
+&#x20;           1
+&#x20;   ] = {};
+
+&#x20;       std::uniform\_int\_distribution\<int>
+&#x20;           randomLetter(
+&#x20;               0,
+&#x20;               25
+&#x20;           );
+
+&#x20;       for (
+&#x20;           int i = 0;
+&#x20;           i < RANDOM\_SEED\_LENGTH;
+&#x20;           ++i
+&#x20;           )
+&#x20;       {
+&#x20;           generatedSeed[
+&#x20;               i
+&#x20;           ] =
+&#x20;               static\_cast\<char>(
+&#x20;                   'A' +
+&#x20;                   randomLetter(
+&#x20;                       randomGenerator
+&#x20;                   )
+&#x20;                   );
+&#x20;       }
+
+&#x20;       generatedSeed[
+&#x20;           RANDOM\_SEED\_LENGTH
+&#x20;       ] =
+&#x20;           '\0';
+
+&#x20;           if (
+&#x20;               seedEdit
+&#x20;               )
+&#x20;           {
+&#x20;               SetWindowTextA(
+&#x20;                   seedEdit,
+&#x20;                   generatedSeed
+&#x20;               );
+&#x20;           }
+
+&#x20;           applySeedSettings();
+}
+
+// ============================================================
+// SEED EDIT SUBCLASS
+// ============================================================
+
+LRESULT CALLBACK seedEditSubclassProcedure(
+&#x20;   HWND hwnd,
+
+&#x20;   UINT message,
+
+&#x20;   WPARAM wParam,
+
+&#x20;   LPARAM lParam,
+
+&#x20;   UINT\_PTR subclassId,
+
+&#x20;   DWORD\_PTR referenceData
+)
+{
+&#x20;   (void)referenceData;
+
+&#x20;   if (
+&#x20;       message ==
+&#x20;       WM\_CHAR &&
+&#x20;       wParam ==
+&#x20;       VK\_RETURN
+&#x20;       )
+&#x20;   {
+&#x20;       applySeedSettings();
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   if (
+&#x20;       message ==
+&#x20;       WM\_NCDESTROY
+&#x20;       )
+&#x20;   {
+&#x20;       RemoveWindowSubclass(
+&#x20;           hwnd,
+
+&#x20;           seedEditSubclassProcedure,
+
+&#x20;           subclassId
+&#x20;       );
+&#x20;   }
+
+&#x20;   return DefSubclassProc(
+&#x20;       hwnd,
+
+&#x20;       message,
+
+&#x20;       wParam,
+
+&#x20;       lParam
+&#x20;   );
+}
+
+// ============================================================
+// PLAY
+// ============================================================
+
+void playSeededPreset()
+{
+&#x20;   simulationRunning =
+&#x20;       false;
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_START,
+&#x20;       "Start"
+&#x20;   );
+
+&#x20;   cells.clear();
+
+&#x20;   gpuCellCount =
+&#x20;       0;
+
+&#x20;   currentWallIndex =
+&#x20;       4;
+
+&#x20;   wallSize =
+&#x20;       0.0;
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_WALL,
+&#x20;       "Wall: None"
+&#x20;   );
+
+&#x20;   constexpr int PLAY\_CELLS\_PER\_COLOR =
+&#x20;       3000;
+
+&#x20;   constexpr int PLAY\_TOTAL\_CELLS =
+&#x20;       PLAY\_CELLS\_PER\_COLOR \*
+&#x20;       COLOR\_COUNT;
+
+&#x20;   cells.reserve(
+&#x20;       static\_cast\<size\_t>(
+&#x20;           PLAY\_TOTAL\_CELLS
+&#x20;           )
+&#x20;   );
+
+&#x20;   for (
+&#x20;       int color = 0;
+&#x20;       color < COLOR\_COUNT;
+&#x20;       ++color
+&#x20;       )
+&#x20;   {
+&#x20;       for (
+&#x20;           int i = 0;
+&#x20;           i < PLAY\_CELLS\_PER\_COLOR;
+&#x20;           ++i
+&#x20;           )
+&#x20;       {
+&#x20;           addPlayCellWithColor(
+&#x20;               cellColors[
+&#x20;                   color
+&#x20;               ]
+&#x20;           );
+&#x20;       }
+&#x20;   }
+
+&#x20;   if (
+&#x20;       !uploadCellsToGPU()
+&#x20;       )
+&#x20;   {
+&#x20;       MessageBoxA(
+&#x20;           mainWindow,
+
+&#x20;           "Failed to upload Play cells to the GPU.",
+
+&#x20;           "GPU Error",
+
+&#x20;           MB\_ICONERROR
+&#x20;       );
+
+&#x20;       return;
+&#x20;   }
+
+&#x20;   simulationRunning =
+&#x20;       true;
+
+&#x20;   setButtonText(
+&#x20;       BUTTON\_START,
+&#x20;       "Pause"
+&#x20;   );
+
+&#x20;   updateGPUSettings();
+
+&#x20;   InvalidateRect(
+&#x20;       mainWindow,
+&#x20;       nullptr,
+&#x20;       FALSE
+&#x20;   );
+}
+
+// ============================================================
+// INITIAL COLOR SETTINGS
+// ============================================================
+
+void initializeColorSettings()
+{
+&#x20;   for (
+&#x20;       int from = 0;
+&#x20;       from < COLOR\_COUNT;
+&#x20;       ++from
+&#x20;       )
+&#x20;   {
+&#x20;       for (
+&#x20;           int to = 0;
+&#x20;           to < COLOR\_COUNT;
+&#x20;           ++to
+&#x20;           )
+&#x20;       {
+&#x20;           attractionSettings[
+&#x20;               from
+&#x20;           ][
+&#x20;               to
+&#x20;           ] =
+&#x20;                   0.0;
+
+&#x20;               attractionRangeSettings[
+&#x20;                   from
+&#x20;               ][
+&#x20;                   to
+&#x20;               ] =
+&#x20;                       100.0;
+&#x20;       }
+&#x20;   }
+}
+
+// ============================================================
+// CREATE CONTROLS
+// ============================================================
+
+void createControls(
+&#x20;   HWND hwnd
+)
+{
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "Add Cell",
+
+&#x20;       10,
+&#x20;       10,
+
+&#x20;       100,
+&#x20;       35,
+
+&#x20;       BUTTON\_ADD
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "Color: White",
+
+&#x20;       120,
+&#x20;       10,
+
+&#x20;       100,
+&#x20;       35,
+
+&#x20;       BUTTON\_COLOR
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "Spawn: 1",
+
+&#x20;       230,
+&#x20;       10,
+
+&#x20;       100,
+&#x20;       35,
+
+&#x20;       BUTTON\_SPAWN
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "Clear Cells",
+
+&#x20;       340,
+&#x20;       10,
+
+&#x20;       100,
+&#x20;       35,
+
+&#x20;       BUTTON\_CLEAR
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "Start",
+
+&#x20;       450,
+&#x20;       10,
+
+&#x20;       100,
+&#x20;       35,
+
+&#x20;       BUTTON\_START
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "Wall: 500x500",
+
+&#x20;       560,
+&#x20;       10,
+
+&#x20;       130,
+&#x20;       35,
+
+&#x20;       BUTTON\_WALL
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "Speed: 60/s",
+
+&#x20;       700,
+&#x20;       10,
+
+&#x20;       110,
+&#x20;       35,
+
+&#x20;       BUTTON\_SPEED
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "True speed: OFF",
+
+&#x20;       820,
+&#x20;       10,
+
+&#x20;       145,
+&#x20;       35,
+
+&#x20;       BUTTON\_TRUE\_SPEED
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "From: White",
+
+&#x20;       10,
+&#x20;       55,
+
+&#x20;       105,
+&#x20;       35,
+
+&#x20;       BUTTON\_FROMCOLOR
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "To: White",
+
+&#x20;       125,
+&#x20;       55,
+
+&#x20;       105,
+&#x20;       35,
+
+&#x20;       BUTTON\_TOCOLOR
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "Attraction: 0%",
+
+&#x20;       10,
+&#x20;       100,
+
+&#x20;       100,
+&#x20;       35,
+
+&#x20;       BUTTON\_ATTRACTION
+&#x20;   );
+
+&#x20;   HWND attractionSlider =
+&#x20;       CreateWindowExA(
+&#x20;           0,
+
+&#x20;           TRACKBAR\_CLASSA,
+
+&#x20;           "",
+
+&#x20;           WS\_VISIBLE |
+&#x20;           WS\_CHILD |
+&#x20;           TBS\_AUTOTICKS |
+&#x20;           TBS\_HORZ,
+
+&#x20;           120,
+&#x20;           100,
+
+&#x20;           200,
+&#x20;           35,
+
+&#x20;           hwnd,
+
+&#x20;           controlId(
+&#x20;               SLIDER\_ATTRACTION
+&#x20;           ),
+
+&#x20;           GetModuleHandleA(
+&#x20;               nullptr
+&#x20;           ),
+
+&#x20;           nullptr
+&#x20;       );
+
+&#x20;   SendMessage(
+&#x20;       attractionSlider,
+
+&#x20;       TBM\_SETRANGE,
+
+&#x20;       TRUE,
+
+&#x20;       MAKELONG(
+&#x20;           -100,
+&#x20;           100
+&#x20;       )
+&#x20;   );
+
+&#x20;   SendMessage(
+&#x20;       attractionSlider,
+
+&#x20;       TBM\_SETPOS,
+
+&#x20;       TRUE,
+
+&#x20;       0
+&#x20;   );
+
+&#x20;   SendMessage(
+&#x20;       attractionSlider,
+
+&#x20;       TBM\_SETTICFREQ,
+
+&#x20;       25,
+
+&#x20;       0
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "Range: 100",
+
+&#x20;       10,
+&#x20;       145,
+
+&#x20;       100,
+&#x20;       35,
+
+&#x20;       BUTTON\_ATTRACTIONRANGE
+&#x20;   );
+
+&#x20;   HWND rangeSlider =
+&#x20;       CreateWindowExA(
+&#x20;           0,
+
+&#x20;           TRACKBAR\_CLASSA,
+
+&#x20;           "",
+
+&#x20;           WS\_VISIBLE |
+&#x20;           WS\_CHILD |
+&#x20;           TBS\_AUTOTICKS |
+&#x20;           TBS\_HORZ,
+
+&#x20;           120,
+&#x20;           145,
+
+&#x20;           200,
+&#x20;           35,
+
+&#x20;           hwnd,
+
+&#x20;           controlId(
+&#x20;               SLIDER\_ATTRACTIONRANGE
+&#x20;           ),
+
+&#x20;           GetModuleHandleA(
+&#x20;               nullptr
+&#x20;           ),
+
+&#x20;           nullptr
+&#x20;       );
+
+&#x20;   SendMessage(
+&#x20;       rangeSlider,
+
+&#x20;       TBM\_SETRANGE,
+
+&#x20;       TRUE,
+
+&#x20;       MAKELONG(
+&#x20;           0,
+&#x20;           300
+&#x20;       )
+&#x20;   );
+
+&#x20;   SendMessage(
+&#x20;       rangeSlider,
+
+&#x20;       TBM\_SETPOS,
+
+&#x20;       TRUE,
+
+&#x20;       100
+&#x20;   );
+
+&#x20;   SendMessage(
+&#x20;       rangeSlider,
+
+&#x20;       TBM\_SETTICFREQ,
+
+&#x20;       25,
+
+&#x20;       0
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "Randomize",
+
+&#x20;       10,
+&#x20;       190,
+
+&#x20;       120,
+&#x20;       35,
+
+&#x20;       BUTTON\_RANDOMIZE\_PAIRS
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "Spawn All",
+
+&#x20;       140,
+&#x20;       190,
+
+&#x20;       120,
+&#x20;       35,
+
+&#x20;       BUTTON\_SPAWN\_ALL
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "All: 1 each",
+
+&#x20;       270,
+&#x20;       190,
+
+&#x20;       120,
+&#x20;       35,
+
+&#x20;       BUTTON\_SPAWN\_ALL\_AMOUNT
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "Realistic Force: OFF",
+
+&#x20;       10,
+&#x20;       235,
+
+&#x20;       180,
+&#x20;       35,
+
+&#x20;       BUTTON\_REALISTIC\_FORCE
+&#x20;   );
+
+&#x20;   createButton(
+&#x20;       hwnd,
+
+&#x20;       "PLAY",
+
+&#x20;       10,
+&#x20;       280,
+
+&#x20;       100,
+&#x20;       35,
+
+&#x20;       BUTTON\_PLAY
+&#x20;   );
+
+&#x20;   createStaticText(
+&#x20;       hwnd,
+
+&#x20;       "Seed:",
+
+&#x20;       120,
+&#x20;       280,
+
+&#x20;       40,
+&#x20;       35
+&#x20;   );
+
+&#x20;   seedEdit =
+&#x20;       CreateWindowExA(
+&#x20;           WS\_EX\_CLIENTEDGE,
+
+&#x20;           "EDIT",
+
+&#x20;           "",
+
+&#x20;           WS\_VISIBLE |
+&#x20;           WS\_CHILD |
+&#x20;           ES\_AUTOHSCROLL |
+&#x20;           ES\_LEFT,
+
+&#x20;           160,
+&#x20;           280,
+
+&#x20;           200,
+&#x20;           35,
+
+&#x20;           hwnd,
+
+&#x20;           controlId(
+&#x20;               EDIT\_SEED
+&#x20;           ),
+
+&#x20;           GetModuleHandleA(
+&#x20;               nullptr
+&#x20;           ),
+
+&#x20;           nullptr
+&#x20;       );
+
+&#x20;   if (
+&#x20;       seedEdit
+&#x20;       )
+&#x20;   {
+&#x20;       SendMessageA(
+&#x20;           seedEdit,
+
+&#x20;           EM\_SETLIMITTEXT,
+
+&#x20;           RANDOM\_SEED\_LENGTH,
+
+&#x20;           0
+&#x20;       );
+
+&#x20;       SetWindowSubclass(
+&#x20;           seedEdit,
+
+&#x20;           seedEditSubclassProcedure,
+
+&#x20;           1,
+
+&#x20;           0
+&#x20;       );
+&#x20;   }
+
+&#x20;   updateFromColorButton();
+
+&#x20;   updateToColorButton();
+
+&#x20;   loadColorPairSettings();
+
+&#x20;   updateSpawnAllButton();
+
+&#x20;   updateTrueSpeedButton();
+}
+
+// ============================================================
+// WINDOW PROCEDURE
+// ============================================================
+
+LRESULT CALLBACK WindowProc(
+&#x20;   HWND hwnd,
+
+&#x20;   UINT message,
+
+&#x20;   WPARAM wParam,
+
+&#x20;   LPARAM lParam
+)
+{
+&#x20;   switch (
+&#x20;       message
+&#x20;       )
+&#x20;   {
+&#x20;   case WM\_CREATE:
+&#x20;   {
+&#x20;       mainWindow =
+&#x20;           hwnd;
+
+&#x20;       initializeColorSettings();
+
+&#x20;       createControls(
+&#x20;           hwnd
+&#x20;       );
+
+&#x20;       if (
+&#x20;           !initializeD3D(
+&#x20;               hwnd
+&#x20;           )
+&#x20;           )
+&#x20;       {
+&#x20;           MessageBoxA(
+&#x20;               hwnd,
+
+&#x20;               "GPU initialization failed.",
+
+&#x20;               "Error",
+
+&#x20;               MB\_ICONERROR
+&#x20;           );
+
+&#x20;           return -1;
+&#x20;       }
+
+&#x20;       gpuCellCount =
+&#x20;           0;
+
+&#x20;       updateGPUSettings();
+
+&#x20;       SetTimer(
+&#x20;           hwnd,
+
+&#x20;           SIMULATION\_TIMER,
+
+&#x20;           DISPLAY\_TIMER\_INTERVAL,
+
+&#x20;           nullptr
+&#x20;       );
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   case WM\_COMMAND:
+&#x20;   {
+&#x20;       int buttonID =
+&#x20;           LOWORD(
+&#x20;               wParam
+&#x20;           );
+
+&#x20;       switch (
+&#x20;           buttonID
+&#x20;           )
+&#x20;       {
+&#x20;       case BUTTON\_ADD:
+
+&#x20;           addCell();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_COLOR:
+
+&#x20;           changeCellColor();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_SPAWN:
+
+&#x20;           changeSpawnAmount();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_CLEAR:
+
+&#x20;           clearCells();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_START:
+&#x20;       {
+&#x20;           simulationRunning =
+&#x20;               !simulationRunning;
+
+&#x20;           setButtonText(
+&#x20;               BUTTON\_START,
+
+&#x20;               simulationRunning
+&#x20;               ? "Pause"
+&#x20;               : "Start"
+&#x20;           );
+
+&#x20;           break;
+&#x20;       }
+
+&#x20;       case BUTTON\_WALL:
+
+&#x20;           changeWall();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_SPEED:
+
+&#x20;           changeProcessSpeed();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_TRUE\_SPEED:
+
+&#x20;           toggleTrueSpeed();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_FROMCOLOR:
+
+&#x20;           changeFromColor();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_TOCOLOR:
+
+&#x20;           changeToColor();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_ATTRACTION:
+
+&#x20;           changeAttraction();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_ATTRACTIONRANGE:
+
+&#x20;           changeAttractionRange();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_RANDOMIZE\_PAIRS:
+
+&#x20;           randomizeAllPairs();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_SPAWN\_ALL:
+
+&#x20;           spawnAllColors();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_SPAWN\_ALL\_AMOUNT:
+
+&#x20;           changeSpawnAllAmount();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_PLAY:
+
+&#x20;           playSeededPreset();
+
+&#x20;           break;
+
+&#x20;       case BUTTON\_REALISTIC\_FORCE:
+
+&#x20;           toggleRealisticForce();
+
+&#x20;           break;
+&#x20;       }
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // SLIDERS
+&#x20;   // ========================================================
+
+&#x20;   case WM\_HSCROLL:
+&#x20;   {
+&#x20;       HWND slider =
+&#x20;           reinterpret\_cast\<HWND>(
+&#x20;               lParam
+&#x20;               );
+
+&#x20;       if (
+&#x20;           !slider
+&#x20;           )
+&#x20;       {
+&#x20;           return 0;
+&#x20;       }
+
+&#x20;       int sliderID =
+&#x20;           GetDlgCtrlID(
+&#x20;               slider
+&#x20;           );
+
+&#x20;       if (
+&#x20;           sliderID ==
+&#x20;           SLIDER\_ATTRACTION
+&#x20;           )
+&#x20;       {
+&#x20;           currentAttraction =
+&#x20;               static\_cast\<double>(
+&#x20;                   SendMessage(
+&#x20;                       slider,
+
+&#x20;                       TBM\_GETPOS,
+
+&#x20;                       0,
+&#x20;                       0
+&#x20;                   )
+&#x20;                   );
+
+&#x20;           saveColorPairSettings();
+
+&#x20;           char text[64];
+
+&#x20;           sprintf\_s(
+&#x20;               text,
+
+&#x20;               sizeof(
+&#x20;                   text
+&#x20;                   ),
+
+&#x20;               "Attraction: %.0f%%",
+
+&#x20;               currentAttraction
+&#x20;           );
+
+&#x20;           setButtonText(
+&#x20;               BUTTON\_ATTRACTION,
+&#x20;               text
+&#x20;           );
+
+&#x20;           return 0;
+&#x20;       }
+
+&#x20;       if (
+&#x20;           sliderID ==
+&#x20;           SLIDER\_ATTRACTIONRANGE
+&#x20;           )
+&#x20;       {
+&#x20;           currentAttractionRange =
+&#x20;               static\_cast\<double>(
+&#x20;                   SendMessage(
+&#x20;                       slider,
+
+&#x20;                       TBM\_GETPOS,
+
+&#x20;                       0,
+&#x20;                       0
+&#x20;                   )
+&#x20;                   );
+
+&#x20;           saveColorPairSettings();
+
+&#x20;           char text[64];
+
+&#x20;           sprintf\_s(
+&#x20;               text,
+
+&#x20;               sizeof(
+&#x20;                   text
+&#x20;                   ),
+
+&#x20;               "Range: %.0f",
+
+&#x20;               currentAttractionRange
+&#x20;           );
+
+&#x20;           setButtonText(
+&#x20;               BUTTON\_ATTRACTIONRANGE,
+&#x20;               text
+&#x20;           );
+
+&#x20;           return 0;
+&#x20;       }
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // TIMER
+&#x20;   // ========================================================
+
+&#x20;   case WM\_TIMER:
+&#x20;   {
+&#x20;       if (
+&#x20;           wParam ==
+&#x20;           SIMULATION\_TIMER
+&#x20;           )
+&#x20;       {
+&#x20;           updateSimulation();
+&#x20;       }
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // BACKGROUND
+&#x20;   // ========================================================
+
+&#x20;   case WM\_ERASEBKGND:
+&#x20;   {
+&#x20;       return 1;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // RIGHT MOUSE
+&#x20;   // ========================================================
+
+&#x20;   case WM\_RBUTTONDOWN:
+&#x20;   {
+&#x20;       rightDragging =
+&#x20;           true;
+
+&#x20;       lastMouseX =
+&#x20;           GET\_X\_LPARAM(
+&#x20;               lParam
+&#x20;           );
+
+&#x20;       lastMouseY =
+&#x20;           GET\_Y\_LPARAM(
+&#x20;               lParam
+&#x20;           );
+
+&#x20;       SetCapture(
+&#x20;           hwnd
+&#x20;       );
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   case WM\_MOUSEMOVE:
+&#x20;   {
+&#x20;       if (
+&#x20;           rightDragging
+&#x20;           )
+&#x20;       {
+&#x20;           int mouseX =
+&#x20;               GET\_X\_LPARAM(
+&#x20;                   lParam
+&#x20;               );
+
+&#x20;           int mouseY =
+&#x20;               GET\_Y\_LPARAM(
+&#x20;                   lParam
+&#x20;               );
+
+&#x20;           int dx =
+&#x20;               mouseX -
+&#x20;               lastMouseX;
+
+&#x20;           int dy =
+&#x20;               mouseY -
+&#x20;               lastMouseY;
+
+&#x20;           cameraX -=
+&#x20;               dx /
+&#x20;               zoom;
+
+&#x20;           cameraY -=
+&#x20;               dy /
+&#x20;               zoom;
+
+&#x20;           lastMouseX =
+&#x20;               mouseX;
+
+&#x20;           lastMouseY =
+&#x20;               mouseY;
+
+&#x20;           InvalidateRect(
+&#x20;               hwnd,
+&#x20;               nullptr,
+&#x20;               FALSE
+&#x20;           );
+&#x20;       }
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   case WM\_RBUTTONUP:
+&#x20;   {
+&#x20;       rightDragging =
+&#x20;           false;
+
+&#x20;       ReleaseCapture();
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // ZOOM
+&#x20;   // ========================================================
+
+&#x20;   case WM\_MOUSEWHEEL:
+&#x20;   {
+&#x20;       double oldZoom =
+&#x20;           zoom;
+
+&#x20;       POINT point =
+&#x20;       {
+&#x20;           GET\_X\_LPARAM(
+&#x20;               lParam
+&#x20;           ),
+
+&#x20;           GET\_Y\_LPARAM(
+&#x20;               lParam
+&#x20;           )
+&#x20;       };
+
+&#x20;       ScreenToClient(
+&#x20;           hwnd,
+&#x20;           &point
+&#x20;       );
+
+&#x20;       RECT rect;
+
+&#x20;       GetClientRect(
+&#x20;           hwnd,
+&#x20;           &rect
+&#x20;       );
+
+&#x20;       int width =
+&#x20;           rect.right -
+&#x20;           rect.left;
+
+&#x20;       int height =
+&#x20;           rect.bottom -
+&#x20;           rect.top;
+
+&#x20;       double mouseWorldX =
+&#x20;           cameraX +
+&#x20;           (
+&#x20;               point.x -
+&#x20;               width /
+&#x20;               2.0
+&#x20;               ) /
+&#x20;           oldZoom;
+
+&#x20;       double mouseWorldY =
+&#x20;           cameraY +
+&#x20;           (
+&#x20;               point.y -
+&#x20;               height /
+&#x20;               2.0
+&#x20;               ) /
+&#x20;           oldZoom;
+
+&#x20;       int wheelDelta =
+&#x20;           GET\_WHEEL\_DELTA\_WPARAM(
+&#x20;               wParam
+&#x20;           );
+
+&#x20;       if (
+&#x20;           wheelDelta >
+&#x20;           0
+&#x20;           )
+&#x20;       {
+&#x20;           zoom \*=
+&#x20;               1.15;
+&#x20;       }
+&#x20;       else if (
+&#x20;           wheelDelta <
+&#x20;           0
+&#x20;           )
+&#x20;       {
+&#x20;           zoom /=
+&#x20;               1.15;
+&#x20;       }
+
+&#x20;       zoom =
+&#x20;           std::clamp(
+&#x20;               zoom,
+
+&#x20;               0.05,
+
+&#x20;               20.0
+&#x20;           );
+
+&#x20;       cameraX =
+&#x20;           mouseWorldX -
+&#x20;           (
+&#x20;               point.x -
+&#x20;               width /
+&#x20;               2.0
+&#x20;               ) /
+&#x20;           zoom;
+
+&#x20;       cameraY =
+&#x20;           mouseWorldY -
+&#x20;           (
+&#x20;               point.y -
+&#x20;               height /
+&#x20;               2.0
+&#x20;               ) /
+&#x20;           zoom;
+
+&#x20;       InvalidateRect(
+&#x20;           hwnd,
+
+&#x20;           nullptr,
+
+&#x20;           FALSE
+&#x20;       );
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // PAINT
+&#x20;   // ========================================================
+
+&#x20;   case WM\_PAINT:
+&#x20;   {
+&#x20;       PAINTSTRUCT ps;
+
+&#x20;       BeginPaint(
+&#x20;           hwnd,
+&#x20;           &ps
+&#x20;       );
+
+&#x20;       renderFrame();
+
+&#x20;       EndPaint(
+&#x20;           hwnd,
+&#x20;           &ps
+&#x20;       );
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // RESIZE
+&#x20;   // ========================================================
+
+&#x20;   case WM\_SIZE:
+&#x20;   {
+&#x20;       if (
+&#x20;           gpuInitialized
+&#x20;           )
+&#x20;       {
+&#x20;           int width =
+&#x20;               LOWORD(
+&#x20;                   lParam
+&#x20;               );
+
+&#x20;           int height =
+&#x20;               HIWORD(
+&#x20;                   lParam
+&#x20;               );
+
+&#x20;           if (
+&#x20;               width >
+&#x20;               0 &&
+&#x20;               height >
+&#x20;               0
+&#x20;               )
+&#x20;           {
+&#x20;               resizeD3D(
+&#x20;                   width,
+&#x20;                   height
+&#x20;               );
+&#x20;           }
+&#x20;       }
+
+&#x20;       InvalidateRect(
+&#x20;           hwnd,
+&#x20;           nullptr,
+&#x20;           FALSE
+&#x20;       );
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   // ========================================================
+&#x20;   // DESTROY
+&#x20;   // ========================================================
+
+&#x20;   case WM\_DESTROY:
+&#x20;   {
+&#x20;       KillTimer(
+&#x20;           hwnd,
+&#x20;           SIMULATION\_TIMER
+&#x20;       );
+
+&#x20;       releaseD3D();
+
+&#x20;       PostQuitMessage(
+&#x20;           0
+&#x20;       );
+
+&#x20;       return 0;
+&#x20;   }
+&#x20;   }
+
+&#x20;   return DefWindowProc(
+&#x20;       hwnd,
+
+&#x20;       message,
+
+&#x20;       wParam,
+
+&#x20;       lParam
+&#x20;   );
+}
+
+// ============================================================
+// MAIN
+// ============================================================
+
+int WINAPI WinMain(
+&#x20;   HINSTANCE hInstance,
+
+&#x20;   HINSTANCE hPrevInstance,
+
+&#x20;   LPSTR lpCmdLine,
+
+&#x20;   int nCmdShow
+)
+{
+&#x20;   (void)hPrevInstance;
+
+&#x20;   (void)lpCmdLine;
+
+&#x20;   INITCOMMONCONTROLSEX
+&#x20;       commonControls = {};
+
+&#x20;   commonControls.dwSize =
+&#x20;       sizeof(
+&#x20;           INITCOMMONCONTROLSEX
+&#x20;           );
+
+&#x20;   commonControls.dwICC =
+&#x20;       ICC\_BAR\_CLASSES;
+
+&#x20;   InitCommonControlsEx(
+&#x20;       &commonControls
+&#x20;   );
+
+&#x20;   const char CLASS\_NAME[] =
+&#x20;       "CellSimulationWindow";
+
+&#x20;   WNDCLASSA wc = {};
+
+&#x20;   wc.lpfnWndProc =
+&#x20;       WindowProc;
+
+&#x20;   wc.hInstance =
+&#x20;       hInstance;
+
+&#x20;   wc.lpszClassName =
+&#x20;       CLASS\_NAME;
+
+&#x20;   wc.hCursor =
+&#x20;       LoadCursor(
+&#x20;           nullptr,
+&#x20;           IDC\_ARROW
+&#x20;       );
+
+&#x20;   wc.hbrBackground =
+&#x20;       nullptr;
+
+&#x20;   if (
+&#x20;       !RegisterClassA(
+&#x20;           &wc
+&#x20;       )
+&#x20;       )
+&#x20;   {
+&#x20;       MessageBoxA(
+&#x20;           nullptr,
+
+&#x20;           "Failed to register window class.",
+
+&#x20;           "Error",
+
+&#x20;           MB\_ICONERROR
+&#x20;       );
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   HWND hwnd =
+&#x20;       CreateWindowExA(
+&#x20;           0,
+
+&#x20;           CLASS\_NAME,
+
+&#x20;           "GPU Cell Simulation",
+
+&#x20;           WS\_OVERLAPPEDWINDOW |
+&#x20;           WS\_CLIPCHILDREN,
+
+&#x20;           CW\_USEDEFAULT,
+&#x20;           CW\_USEDEFAULT,
+
+&#x20;           1100,
+&#x20;           700,
+
+&#x20;           nullptr,
+&#x20;           nullptr,
+
+&#x20;           hInstance,
+
+&#x20;           nullptr
+&#x20;       );
+
+&#x20;   if (
+&#x20;       !hwnd
+&#x20;       )
+&#x20;   {
+&#x20;       MessageBoxA(
+&#x20;           nullptr,
+
+&#x20;           "Failed to create window.",
+
+&#x20;           "Error",
+
+&#x20;           MB\_ICONERROR
+&#x20;       );
+
+&#x20;       return 0;
+&#x20;   }
+
+&#x20;   mainWindow =
+&#x20;       hwnd;
+
+&#x20;   ShowWindow(
+&#x20;       hwnd,
+&#x20;       nCmdShow
+&#x20;   );
+
+&#x20;   UpdateWindow(
+&#x20;       hwnd
+&#x20;   );
+
+&#x20;   MSG msg = {};
+
+&#x20;   while (
+&#x20;       GetMessageA(
+&#x20;           &msg,
+
+&#x20;           nullptr,
+
+&#x20;           0,
+
+&#x20;           0
+&#x20;       ) >
+&#x20;       0
+&#x20;       )
+&#x20;   {
+&#x20;       TranslateMessage(
+&#x20;           &msg
+&#x20;       );
+
+&#x20;       DispatchMessageA(
+&#x20;           &msg
+&#x20;       );
+&#x20;   }
+
+&#x20;   return 0;
+}
