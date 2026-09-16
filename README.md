@@ -1,1 +1,1 @@
-Coded by C++ used AI tools
+Coded by C++ and used AI tools
